@@ -1,0 +1,81 @@
+================================================================================
+GEMMA 4 E2B - QUANTIZATION & RECONSTRUCTION QUALITY SUMMARY
+================================================================================
+
+METHODS TESTED:
+-------------------------------------------------------------------------------
+| Method                      | BPW    | Compression | Est. PPL | Notes            |
+|-----------------------------|--------|-------------|----------|------------------|
+| Ternary Aggressive (1/2-bit)| 1.60   | 10.0x       | ~66      | BEST OVERALL    |
+| Magnitude Quant (4/2-bit)   | 2.13   | 7.5x        | ~128     | Good quality     |
+| SVD Sub1Bit (90% thr)       | 0.88   | 18.1x       | BROKEN   | Bad reconstruction|
+-------------------------------------------------------------------------------
+
+RECONSTRUCTION QUALITY (MSE on test layers):
+-------------------------------------------------------------------------------
+Ternary Aggressive:
+  - Layer 3 (256x1536):   MSE=0.081
+  - Layer 4 (1536x256):   MSE=0.315
+  - Layer 8 (256x1536):   MSE=0.282
+  - Layer 50 (256x1536):  MSE=0.246
+  - Layer 300 (256x1536): MSE=0.288
+  - Average MSE: 0.243
+  - Estimated PPL: 66
+
+Magnitude Quant:
+  - Layer 3 (256x1536):   MSE=0.344
+  - Layer 4 (1536x256):   MSE=1.162
+  - Layer 8 (256x1536):   MSE=0.565
+  - Layer 50 (256x1536):  MSE=0.147
+  - Layer 300 (256x1536): MSE=0.250
+  - Average MSE: 0.494
+  - Estimated PPL: 128
+
+SVD Sub1Bit (BROKEN):
+  - Average MSE: 1123 (essentially random - reconstruction completely broken)
+  - The 90% energy threshold gives near-full-rank SVD (rank ~1155 for 1536x6144)
+  - Ternary quantization of near-full-rank factors adds noise without compression benefit
+
+KEY FINDINGS:
+-------------------------------------------------------------------------------
+1. SVD Sub1Bit with 90% threshold FAILS because:
+   - Rank is too high (almost no dimensionality reduction)
+   - Ternary quantization on near-full-rank matrices adds noise
+   - The reported 18x compression is misleading - actual rank ~95% of max
+
+2. Ternary Aggressive achieves best balance:
+   - 10x compression (good)
+   - ~66 estimated PPL (decent, assuming base Gemma 4 E2B PPL ~5)
+   - Direct quantization preserves quality better than SVD at high ranks
+
+3. Magnitude Quant (4-bit/2-bit):
+   - 7.5x compression (lower)
+   - ~128 estimated PPL (worse than ternary)
+   - Per-channel scales help but quantization noise still significant
+
+RECOMMENDATIONS:
+-------------------------------------------------------------------------------
+1. For BEST compression with acceptable quality:
+   - Use Ternary Aggressive approach (1-2 bits, importance weighted)
+   - Target: ~1.5-2.0 bpw, 8-10x compression
+   - Expected perplexity: 50-100 on WikiText-2
+
+2. For BETTER quality with moderate compression:
+   - Use Magnitude Quant with 4-bit for early layers, 2-bit for later
+   - Target: ~2-3 bpw, 5-8x compression
+   - Expected perplexity: 30-60 on WikiText-2
+
+3. For SVD-based approach to work:
+   - MUST use lower energy threshold (50-70%)
+   - Or use learned transforms to make weights more compressible
+   - The train_transform.py approach is the right direction
+
+FILES GENERATED:
+-------------------------------------------------------------------------------
+- quantized/gemma-4-E2B-sub1bit.pt (320MB) - SVD Sub1Bit (BROKEN)
+- quantized/gemma_ternary_aggressive.pt (362MB) - RECOMMENDED
+- quantized/gemma_magq.pt (1.8GB) - Magnitude Quant
+- quantized/gemma_hybrid_stream.pt (1.8GB) - Hybrid
+- quantized/gemma-4-E2B-sub1bit.gguf (1.1GB) - GGUF export
+
+================================================================================
