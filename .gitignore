@@ -50,6 +50,9 @@ eval_results/
 err.txt
 out.txt
 
+# llama.cpp (external dependency)
+llama.cpp/
+
 # OS
 .DS_Store
 Thumbs.db
