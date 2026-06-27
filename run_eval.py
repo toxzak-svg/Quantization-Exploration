@@ -6,26 +6,26 @@ import os
 os.chdir(r'C:\Users\Zwmar\projects\sub1quant')
 sys.path.insert(0, r'.\scripts')
 
-from eval_quantized import eval_perplexity, reconstruct_weight
+from eval_quantized import apply_quantized_weights, eval_perplexity
 
 print("=" * 60)
-print("PERPLEXITY EVALUATION - Sub1BitLLM")
+print("PERPLEXITY EVALUATION - Quantized Gemma")
 print("=" * 60)
 
 device = 'cpu'
 print(f"Device: {device}")
 
 print("\n[1] Loading quantized checkpoint...")
-q_data = torch.load('llama-2-7b-sub1bit.gguf.pt', map_location='cpu', weights_only=True)
+q_data = torch.load('quantized/gemma-4-E2B-sub1bit.pt', map_location='cpu', weights_only=True)
 quantized = q_data['quantized']
 print(f"  {len(quantized)} quantized entries")
 
 print("\n[2] Loading base model...")
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained('models/llama-2-7b-hf', trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained('models/gemma-4-E2B', trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
-    'models/llama-2-7b-hf',
+    'models/gemma-4-E2B',
     device_map=device,
     torch_dtype=torch.float32,
     trust_remote_code=True
@@ -34,25 +34,16 @@ model.eval()
 print("  Model loaded")
 
 print("\n[3] Reconstructing quantized weights...")
-name_to_idx = {}
-for name, module in model.named_modules():
-    if hasattr(module, 'weight') and name.endswith('.weight'):
-        name_to_idx[name.replace('.weight', '')] = module
-
-matched = 0
-for q_idx_str, q_entry in quantized.items():
-    orig_shape = tuple(q_entry['original_shape'])
-    for mod_name, module in name_to_idx.items():
-        if tuple(module.weight.shape) == orig_shape:
-            W_recon = reconstruct_weight(q_entry, device)
-            with torch.no_grad():
-                module.weight.data = W_recon.to(
-                    dtype=module.weight.dtype, device=module.weight.device
-                )
-            matched += 1
-            break
-
-print(f"  Replaced {matched}/{len(quantized)} weights")
+apply_stats = apply_quantized_weights(
+    model,
+    quantized,
+    device=device,
+    model_dir='models/gemma-4-E2B',
+    checkpoint_weight_keys=q_data.get('weight_keys'),
+)
+print(f"  Replaced {apply_stats['replaced']}/{len(quantized)} weights")
+if apply_stats['skipped']:
+    print(f"  Skipped {len(apply_stats['skipped'])} shared-KV checkpoint entries")
 
 print("\n[4] Evaluating perplexity...")
 ppl, stats = eval_perplexity(model, tokenizer, 'data/wiki.test.txt', device)

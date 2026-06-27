@@ -1,133 +1,115 @@
 """
-Perplexity calculation for sub1bit GGUF.
-Uses the streaming GEMV approach to evaluate model loss.
+Perplexity evaluation for quantized .pt checkpoints.
+
+This runs a real transformer forward pass after applying quantized weights.
+For GGUF/GEMV latency checks, use run_gemv_chain.py instead.
 """
 
-import torch
-import math
-from stream_inference_gguf import GGUFReader, ternary_gemv
+import argparse
+import gc
 from pathlib import Path
 
-def calculate_perplexity_simple(gguf_path, test_data, num_layers=35):
-    """
-    Calculate perplexity on test data.
+import torch
 
-    This is a simplified version - real perplexity would require
-    full transformer forward pass with attention, layer norms, etc.
-    Here we just measure the GEMV chain performance.
-    """
-    print(f"Loading GGUF: {gguf_path}")
-    print(f"Size: {Path(gguf_path).stat().st_size / 1e6:.1f} MB")
-
-    with GGUFReader(gguf_path) as reader:
-        metadata = reader.metadata
-        print(f"Model: {metadata.get('general.name')}")
-        print(f"Layers: {metadata.get('gemma.num_layers')}")
-
-        # Process layers and measure time
-        import time
-        times = []
-
-        for layer_idx in range(num_layers):
-            tensors = reader.get_layer(layer_idx)
-            if not tensors:
-                break
-
-            U_shape = tuple(tensors['U_shape'].tolist())
-            Vt_shape = tuple(tensors['Vt_shape'].tolist())
-
-            x = torch.randn(Vt_shape[1])
-
-            start = time.perf_counter()
-            y = ternary_gemv(
-                tensors['U_packed'],
-                tensors['Vt_packed'],
-                tensors['S'],
-                tensors['U_scale'].item(),
-                tensors['Vt_scale'].item(),
-                tensors['S_scale'].item(),
-                x,
-                U_shape,
-                Vt_shape
-            )
-            elapsed = time.perf_counter() - start
-            times.append(elapsed)
-
-        avg_time = sum(times) / len(times)
-        total_time = sum(times)
-
-        print(f"\n=== Results ===")
-        print(f"Layers processed: {len(times)}")
-        print(f"Average time: {avg_time*1000:.2f}ms per layer")
-        print(f"Total time: {total_time:.2f}s")
-        print(f"Estimated full pass (316 layers): {total_time/num_layers*316:.2f}s")
-
-        return {
-            'num_layers': len(times),
-            'avg_time_ms': avg_time * 1000,
-            'total_time': total_time,
-        }
+from scripts.eval_quantized import apply_quantized_weights, eval_perplexity
 
 
-def run_inference_test(gguf_path, prompt="The future of artificial intelligence is", max_tokens=20):
-    """
-    Run text generation test.
-    This simulates inference by running GEMV chains.
-    """
-    print(f"\n=== Inference Test ===")
-    print(f"Prompt: {prompt}")
-    print(f"Max tokens: {max_tokens}")
+def evaluate_quantized_perplexity(
+    model_name="models/gemma-4-E2B",
+    quantized_path="quantized/gemma-4-E2B-sub1bit.pt",
+    wikitext_path="data/wiki.test.txt",
+    device=None,
+    max_length=512,
+    stride=512,
+):
+    """Evaluate WikiText perplexity after applying quantized weights."""
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    with GGUFReader(gguf_path) as reader:
-        metadata = reader.metadata
-        print(f"Model: {metadata.get('general.name')}")
+    if not Path(wikitext_path).exists():
+        raise FileNotFoundError(f"WikiText not found: {wikitext_path}")
 
-        import time
-        start = time.perf_counter()
+    print("=" * 60)
+    print("QUANTIZED MODEL PERPLEXITY EVALUATION")
+    print("=" * 60)
+    print(f"Device: {device}")
+    print(f"Model: {model_name}")
+    print(f"Quantized: {quantized_path}")
+    print(f"WikiText: {wikitext_path}")
 
-        # Simulate token generation
-        for token in range(max_tokens):
-            # For each token, run through all layers
-            for layer_idx in range(35):  # num_layers
-                tensors = reader.get_layer(layer_idx)
-                if not tensors:
-                    break
+    print("\n[1] Loading quantized checkpoint...")
+    q_data = torch.load(quantized_path, map_location="cpu", weights_only=True)
+    quantized = q_data["quantized"]
+    print(f"  {len(quantized)} quantized entries")
 
-                U_shape = tuple(tensors['U_shape'].tolist())
-                Vt_shape = tuple(tensors['Vt_shape'].tolist())
+    print("\n[2] Loading base model...")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
-                x = torch.randn(Vt_shape[1])
-                y = ternary_gemv(
-                    tensors['U_packed'],
-                    tensors['Vt_packed'],
-                    tensors['S'],
-                    tensors['U_scale'].item(),
-                    tensors['Vt_scale'].item(),
-                    tensors['S_scale'].item(),
-                    x,
-                    U_shape,
-                    Vt_shape
-                )
+    torch_dtype = torch.float16 if device == "cuda" else torch.float32
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map=device,
+        torch_dtype=torch_dtype,
+        trust_remote_code=True,
+    )
+    model.eval()
 
-        elapsed = time.perf_counter() - start
+    print("\n[3] Applying quantized weights...")
+    apply_stats = apply_quantized_weights(
+        model,
+        quantized,
+        device=device,
+        model_dir=model_name if Path(model_name).is_dir() else None,
+        checkpoint_weight_keys=q_data.get("weight_keys"),
+    )
+    print(f"  Replaced {apply_stats['replaced']}/{len(quantized)} weights")
+    if apply_stats["skipped"]:
+        print(f"  Skipped {len(apply_stats['skipped'])} shared-KV checkpoint entries")
 
-        print(f"Generated {max_tokens} tokens in {elapsed:.2f}s")
-        print(f"Speed: {elapsed/max_tokens:.2f}s per token")
+    print("\n[4] Evaluating perplexity...")
+    ppl, stats = eval_perplexity(
+        model,
+        tokenizer,
+        wikitext_path,
+        device,
+        max_length=max_length,
+        stride=stride,
+    )
 
-        return elapsed / max_tokens
+    print()
+    print("=" * 60)
+    print("RESULTS")
+    print("=" * 60)
+    print(f"  Perplexity: {ppl:.4f}")
+    print(f"  Chunks: {stats['n_chunks']}")
+    print(f"  Target: <= 10.5")
+    print(f"  Status: {'PASS' if ppl <= 10.5 else 'FAIL'}")
+    print("=" * 60)
+
+    del model
+    gc.collect()
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
+    return ppl, stats
 
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--gguf', default='quantized/gemma-4-E2B-sub1bit-stream.gguf')
-    parser.add_argument('--mode', choices=['perplexity', 'inference'], default='perplexity')
-    parser.add_argument('--layers', type=int, default=35)
-    parser.add_argument('--prompt', default='The future of AI is')
-    parser.add_argument('--tokens', type=int, default=20)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate quantized model perplexity")
+    parser.add_argument("--model", default="models/gemma-4-E2B")
+    parser.add_argument("--quantized", default="quantized/gemma-4-E2B-sub1bit.pt")
+    parser.add_argument("--wikitext", default="data/wiki.test.txt")
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--max-length", type=int, default=512)
+    parser.add_argument("--stride", type=int, default=512)
     args = parser.parse_args()
 
-    if args.mode == 'perplexity':
-        calculate_perplexity_simple(args.gguf, None, num_layers=args.layers)
-    else:
-        run_inference_test(args.gguf, prompt=args.prompt, max_tokens=args.tokens)
+    evaluate_quantized_perplexity(
+        model_name=args.model,
+        quantized_path=args.quantized,
+        wikitext_path=args.wikitext,
+        device=args.device,
+        max_length=args.max_length,
+        stride=args.stride,
+    )

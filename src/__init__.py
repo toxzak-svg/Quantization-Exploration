@@ -7,6 +7,13 @@ from .quantization import (
     sigma_quantize, sigma_dequantize,
     quantize_factor, pack_factor, unpack_factor, dequantize_factor,
 )
+from .groupwise_int4 import (
+    dequantize_groupwise_int4,
+    estimate_groupwise_int4_bpw,
+    pack_signed_int4,
+    quantize_groupwise_int4,
+    unpack_signed_int4,
+)
 from .gguf_writer import GGUFWriter, GGML_TYPES, GGUF_TYPES
 from .pack_gguf import pack_sub1bit_model, QuantizedLayer
 
@@ -26,6 +33,11 @@ __all__ = [
     "pack_factor",
     "unpack_factor",
     "dequantize_factor",
+    "dequantize_groupwise_int4",
+    "estimate_groupwise_int4_bpw",
+    "pack_signed_int4",
+    "quantize_groupwise_int4",
+    "unpack_signed_int4",
     "GGUFWriter",
     "GGML_TYPES",
     "GGUF_TYPES",

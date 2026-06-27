@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Dict, List
 import os
 import gc
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.groupwise_int4 import dequantize_groupwise_int4
 
 def load_gemma_weights_slice(model_dir: str, keys_to_load: List[str] = None) -> Dict:
     """Load only specific weights for evaluation"""
@@ -98,6 +102,10 @@ def reconstruct_from_svd_sub1bit(q_entry, device='cpu'):
 
     return torch.matmul(U * S.unsqueeze(0), Vt)
 
+def reconstruct_from_groupwise_int4(q_entry, device='cpu'):
+    """Reconstruct from packed row-wise group INT4 format"""
+    return dequantize_groupwise_int4(q_entry, device)
+
 def evaluate_reconstruction(quantized_path: str, original_weights: Dict, method: str) -> Dict:
     """Evaluate reconstruction quality for a quantized model"""
     q_data = torch.load(quantized_path, map_location='cpu', weights_only=True)
@@ -114,7 +122,8 @@ def evaluate_reconstruction(quantized_path: str, original_weights: Dict, method:
         'hybrid': reconstruct_from_quantized_hybrid,
         'ternary_aggressive': reconstruct_from_ternary_aggressive,
         'magnitude': reconstruct_from_magnitude,
-        'svd_sub1bit': reconstruct_from_svd_sub1bit
+        'svd_sub1bit': reconstruct_from_svd_sub1bit,
+        'groupwise_int4': reconstruct_from_groupwise_int4,
     }.get(method, reconstruct_from_quantized_hybrid)
 
     for idx, q_entry in quantized.items():
@@ -182,6 +191,7 @@ def main():
 
     # Evaluate each quantized model
     models = [
+        ('quantized/gemma_groupwise_int4_g128.pt', 'groupwise_int4'),
         ('quantized/gemma_hybrid_stream.pt', 'hybrid'),
         ('quantized/gemma_ternary_aggressive.pt', 'ternary_aggressive'),
         ('quantized/gemma_magq.pt', 'magnitude'),

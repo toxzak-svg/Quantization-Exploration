@@ -1,18 +1,242 @@
 import torch
 import gc
 import argparse
+import json
+import struct
 from pathlib import Path
 import sys
+from typing import Callable, Iterable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.groupwise_int4 import dequantize_groupwise_int4
 from src.quantization import ternary_unpack, sigma_dequantize
 
 
+def _as_tensor(value, device: str, dtype=torch.float32) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value.to(device=device, dtype=dtype)
+    return torch.tensor(value, device=device, dtype=dtype)
+
+
+def _shape_tuple(shape) -> Optional[tuple]:
+    if shape is None:
+        return None
+    if isinstance(shape, torch.Tensor):
+        shape = shape.tolist()
+    return tuple(int(dim) for dim in shape)
+
+
+def quantized_entry_shape(q_entry: dict) -> Optional[tuple]:
+    shape = q_entry.get('original_shape', q_entry.get('orig_shape'))
+    if shape is not None:
+        return _shape_tuple(shape)
+    if 'U_shape' in q_entry and 'Vt_shape' in q_entry:
+        u_shape = _shape_tuple(q_entry['U_shape'])
+        vt_shape = _shape_tuple(q_entry['Vt_shape'])
+        return (u_shape[0], vt_shape[1])
+    return None
+
+
+def normalize_checkpoint_weight_keys(weight_keys: Optional[Iterable]) -> list[tuple[str, tuple]]:
+    if not weight_keys:
+        return []
+
+    normalized = []
+    for item in weight_keys:
+        if isinstance(item, dict):
+            key = item.get('key') or item.get('name')
+            shape = item.get('shape') or item.get('original_shape') or item.get('orig_shape')
+        else:
+            key, shape = item
+        if key:
+            normalized.append((key, _shape_tuple(shape)))
+    return normalized
+
+
+def load_model_weight_keys(model_dir: str | Path) -> list[tuple[str, tuple]]:
+    """Recover quantization key order from local safetensors metadata."""
+    model_dir = Path(model_dir)
+    safetensor_files = sorted(model_dir.glob("*.safetensors"))
+    weight_keys = []
+
+    for safetensor_path in safetensor_files:
+        with open(safetensor_path, 'rb') as f:
+            header_size = struct.unpack('<Q', f.read(8))[0]
+            header = json.loads(f.read(header_size))
+
+        for key, info in header.items():
+            if key == '__metadata__' or not isinstance(info, dict):
+                continue
+            shape = info.get('shape')
+            if 'weight' not in key or shape is None or len(shape) != 2:
+                continue
+            if any(x in key for x in [
+                'lm_head',
+                'embed_tokens',
+                'norm',
+                'audio_tower',
+                'vision_tower',
+                'embed_vision',
+            ]):
+                continue
+            weight_keys.append((key, _shape_tuple(shape)))
+
+    language_model_keys = [item for item in weight_keys if 'language_model' in item[0]]
+    return language_model_keys or weight_keys
+
+
+def resolve_quantized_weight_key(
+    entry_index,
+    q_entry: dict,
+    fallback_weight_keys: Optional[list[tuple[str, tuple]]] = None,
+) -> str:
+    key = q_entry.get('key')
+    if key:
+        return key
+
+    if fallback_weight_keys:
+        try:
+            fallback_index = int(entry_index)
+        except (TypeError, ValueError) as exc:
+            raise KeyError(
+                f"Quantized entry {entry_index!r} has no key and cannot be mapped by index"
+            ) from exc
+
+        if fallback_index >= len(fallback_weight_keys):
+            raise KeyError(
+                f"Quantized entry {entry_index!r} has no key and exceeds "
+                f"{len(fallback_weight_keys)} fallback model weights"
+            )
+
+        key, expected_shape = fallback_weight_keys[fallback_index]
+        entry_shape = quantized_entry_shape(q_entry)
+        if entry_shape is not None and expected_shape is not None and entry_shape != expected_shape:
+            raise ValueError(
+                f"Legacy quantized entry {entry_index!r} maps to {key}, but "
+                f"checkpoint shape {entry_shape} != model shape {expected_shape}"
+            )
+        return key
+
+    raise KeyError(
+        f"Quantized entry {entry_index!r} has no source key. Pass a local "
+        "model directory with safetensors metadata or use a checkpoint that stores keys."
+    )
+
+
 def reconstruct_weight(q_entry: dict, device: str = 'cpu') -> torch.Tensor:
-    U = ternary_unpack(q_entry['U_packed'].to(device), q_entry['U_shape']).float() * q_entry['U_scale'].to(device).float()
-    Vt = ternary_unpack(q_entry['Vt_packed'].to(device), q_entry['Vt_shape']).float() * q_entry['Vt_scale'].to(device).float()
-    S = sigma_dequantize(q_entry['S'].to(device), q_entry['S_scale'].to(device))
+    U_scale = _as_tensor(q_entry['U_scale'], device)
+    Vt_scale = _as_tensor(q_entry['Vt_scale'], device)
+    S_scale = _as_tensor(q_entry['S_scale'], device)
+    U = ternary_unpack(q_entry['U_packed'].to(device), q_entry['U_shape']).float() * U_scale
+    Vt = ternary_unpack(q_entry['Vt_packed'].to(device), q_entry['Vt_shape']).float() * Vt_scale
+    S = sigma_dequantize(q_entry['S'].to(device), S_scale)
     return torch.matmul(U * S.unsqueeze(0), Vt)
+
+
+def reconstruct_quantized_entry(q_entry: dict, device: str = 'cpu') -> torch.Tensor:
+    if q_entry.get('format') == 'groupwise_int4' or 'packed_int4' in q_entry:
+        return dequantize_groupwise_int4(q_entry, device)
+
+    if {'U_packed', 'Vt_packed', 'S'}.issubset(q_entry):
+        return reconstruct_weight(q_entry, device)
+
+    if 'packed' in q_entry:
+        shape = q_entry['orig_shape']
+        scale = _as_tensor(q_entry['scale'], device)
+        return ternary_unpack(q_entry['packed'].to(device), shape).float() * scale
+
+    if 'q' in q_entry:
+        num_bits = int(q_entry.get('num_bits', 0))
+        qmax = 2 ** (num_bits - 1) - 1
+        if qmax <= 0:
+            raise ValueError(f"Unsupported num_bits for magnitude checkpoint: {num_bits}")
+
+        q = q_entry['q'].to(device).float()
+        shape = quantized_entry_shape(q_entry)
+        if shape is not None and q.numel() == shape[0] * shape[1]:
+            q = q.reshape(shape)
+
+        scale = q_entry['scale']
+        if q_entry.get('per_channel'):
+            scale = _as_tensor(scale, device).reshape(-1, 1)
+        else:
+            scale = _as_tensor(scale, device)
+        return q * scale / qmax
+
+    raise ValueError(f"Unknown quantized entry format: {sorted(q_entry.keys())}")
+
+
+def build_model_weight_map(model) -> dict[str, object]:
+    weight_map = {}
+    for name, module in model.named_modules():
+        if getattr(module, 'weight', None) is None:
+            continue
+        weight_key = f"{name}.weight" if name else "weight"
+        weight_map[weight_key] = module
+    return weight_map
+
+
+def is_expected_missing_shared_kv_weight(key: str, weight_map: dict[str, object]) -> bool:
+    if key.endswith('.self_attn.k_proj.weight'):
+        q_key = key.replace('.k_proj.weight', '.q_proj.weight')
+        o_key = key.replace('.k_proj.weight', '.o_proj.weight')
+        return q_key in weight_map or o_key in weight_map
+    if key.endswith('.self_attn.v_proj.weight'):
+        q_key = key.replace('.v_proj.weight', '.q_proj.weight')
+        o_key = key.replace('.v_proj.weight', '.o_proj.weight')
+        return q_key in weight_map or o_key in weight_map
+    return False
+
+
+def apply_quantized_weights(
+    model,
+    quantized: dict,
+    device: str = 'cpu',
+    model_dir: str | Path | None = None,
+    checkpoint_weight_keys: Optional[Iterable] = None,
+    reconstruct_fn: Callable[[dict, str], torch.Tensor] = reconstruct_quantized_entry,
+    strict: bool = True,
+) -> dict:
+    fallback_weight_keys = normalize_checkpoint_weight_keys(checkpoint_weight_keys)
+    if not fallback_weight_keys and model_dir is not None:
+        fallback_weight_keys = load_model_weight_keys(model_dir)
+
+    weight_map = build_model_weight_map(model)
+    stats = {'replaced': 0, 'skipped': [], 'missing': [], 'shape_mismatches': []}
+
+    for entry_index, q_entry in quantized.items():
+        key = resolve_quantized_weight_key(entry_index, q_entry, fallback_weight_keys)
+        module = weight_map.get(key)
+        if module is None:
+            if is_expected_missing_shared_kv_weight(key, weight_map):
+                stats['skipped'].append(key)
+                continue
+            message = f"No model module found for quantized weight {key}"
+            if strict:
+                raise KeyError(message)
+            stats['missing'].append(message)
+            continue
+
+        reconstructed = reconstruct_fn(q_entry, device)
+        target_shape = tuple(module.weight.shape)
+        if tuple(reconstructed.shape) != target_shape:
+            message = (
+                f"Shape mismatch for {key}: reconstructed {tuple(reconstructed.shape)} "
+                f"!= model {target_shape}"
+            )
+            if strict:
+                raise ValueError(message)
+            stats['shape_mismatches'].append(message)
+            continue
+
+        with torch.no_grad():
+            module.weight.data = reconstructed.to(
+                dtype=module.weight.dtype,
+                device=module.weight.device,
+            )
+        stats['replaced'] += 1
+
+    return stats
 
 
 def eval_perplexity(model, tokenizer, wikitext_path: str, device: str,
@@ -53,10 +277,10 @@ def eval_perplexity(model, tokenizer, wikitext_path: str, device: str,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate quantized sub-1bit model perplexity")
-    parser.add_argument('--quantized-pt', default='llama-2-7b-sub1bit.gguf.pt',
+    parser = argparse.ArgumentParser(description="Evaluate quantized model perplexity")
+    parser.add_argument('--quantized-pt', default='quantized/gemma-4-E2B-sub1bit.pt',
                         help='Path to quantized .pt checkpoint')
-    parser.add_argument('--model-dir', default='models/llama-2-7b-hf',
+    parser.add_argument('--model-dir', default='models/gemma-4-E2B',
                         help='Path to base model directory')
     parser.add_argument('--wikitext', default='data/wiki.test.txt',
                         help='Path to WikiText test file')
@@ -108,26 +332,17 @@ def main():
     print()
 
     # 3. Reconstruct weights
-    print("[3] Reconstructing quantized weights...")
-    name_to_idx = {}
-    for name, module in model.named_modules():
-        if hasattr(module, 'weight') and name.endswith('.weight'):
-            name_to_idx[name.replace('.weight', '')] = module
-
-    matched_entries = 0
-    for q_idx_str, q_entry in quantized.items():
-        orig_shape = tuple(q_entry['original_shape'])
-        for mod_name, module in name_to_idx.items():
-            if tuple(module.weight.shape) == orig_shape:
-                W_recon = reconstruct_weight(q_entry, device)
-                with torch.no_grad():
-                    module.weight.data = W_recon.to(
-                        dtype=module.weight.dtype, device=module.weight.device
-                    )
-                matched_entries += 1
-                break
-
-    print(f"  Replaced {matched_entries}/{len(quantized)} weights")
+    print("[3] Applying quantized weights...")
+    apply_stats = apply_quantized_weights(
+        model,
+        quantized,
+        device=device,
+        model_dir=args.model_dir,
+        checkpoint_weight_keys=q_data.get('weight_keys'),
+    )
+    print(f"  Replaced {apply_stats['replaced']}/{len(quantized)} weights")
+    if apply_stats['skipped']:
+        print(f"  Skipped {len(apply_stats['skipped'])} shared-KV checkpoint entries")
     print()
 
     # 4. Evaluate perplexity

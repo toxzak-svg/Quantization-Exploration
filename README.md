@@ -8,15 +8,17 @@ Experiments in ultra-low bit quantization (≤0.7 bits/weight) for LLM inference
 
 | Method | BPW | Compression | Est. PPL | Status |
 |--------|-----|------------|----------|--------|
+| **Groupwise INT4 (g128)** | 4.13 | 3.88x vs BF16 | TBD | **PIVOT FOR FP8-LIKE QUALITY** |
 | **Ternary Aggressive** | 1.60 | 10x | ~66 | **RECOMMENDED** |
 | Magnitude Quant (4/2-bit) | 2.13 | 7.5x | ~128 | Good quality |
 | SVD Sub1Bit (90% thr) | 0.88 | 18x | BROKEN | Failed |
 
 ### Key Findings
 
-1. **Ternary Aggressive achieves best balance** with 10x compression and ~66 estimated perplexity
-2. **SVD with 90% threshold FAILS** - near-full-rank decomposition (95% of max) provides no actual compression benefit
-3. **Per-layer MSE analysis** available in [EVAL_RESULTS.md](EVAL_RESULTS.md)
+1. **Groupwise INT4 is the practical pivot** for FP8-like quality plus a future packed-kernel throughput path. See [FAST_INT4_PIVOT.md](FAST_INT4_PIVOT.md).
+2. **Ternary Aggressive achieves best balance among the original low-BPW experiments** with 10x compression and ~66 estimated perplexity
+3. **SVD with 90% threshold FAILS** - near-full-rank decomposition (95% of max) provides no actual compression benefit
+4. **Per-layer MSE analysis** available in [EVAL_RESULTS.md](EVAL_RESULTS.md)
 
 ---
 

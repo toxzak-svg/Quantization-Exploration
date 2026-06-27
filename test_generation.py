@@ -1,24 +1,26 @@
 """
-Text generation test using sub1bit quantized weights.
-Loads gemma-4-E2B and replaces weights with sub1bit factors.
+Text generation test using quantized weights.
+Loads a base model, applies the quantized checkpoint, and generates text.
 """
 
 import torch
 import time
-import gc
 from pathlib import Path
 
-def test_generation(model_name="models/gemma-4-E2B", max_tokens=20):
-    """Generate text using sub1bit weights."""
+from scripts.eval_quantized import apply_quantized_weights
 
-    print(f"Loading quantized weights...")
-    q_data = torch.load('quantized/gemma-4-E2B-sub1bit.pt', map_location='cpu', weights_only=True)
+
+def test_generation(
+    model_name="models/gemma-4-E2B",
+    quantized_path="quantized/gemma-4-E2B-sub1bit.pt",
+    max_tokens=20,
+):
+    """Generate text after replacing model weights with a quantized checkpoint."""
+
+    print(f"Loading quantized weights: {quantized_path}")
+    q_data = torch.load(quantized_path, map_location='cpu', weights_only=True)
     quantized = q_data.get('quantized', {})
     print(f"Loaded {len(quantized)} quantized matrices")
-
-    # Build layer index mapping
-    # We need to figure out which quantized matrix corresponds to which model weight
-    # This requires knowing the weight names from the original model
 
     print(f"\nLoading tokenizer...")
     from transformers import AutoTokenizer
@@ -51,6 +53,18 @@ def test_generation(model_name="models/gemma-4-E2B", max_tokens=20):
         print("Not enough RAM to load full model + quantized weights")
         return
 
+    print(f"\nApplying quantized weights...")
+    apply_stats = apply_quantized_weights(
+        model,
+        quantized,
+        device="cpu",
+        model_dir=model_name if Path(model_name).is_dir() else None,
+        checkpoint_weight_keys=q_data.get('weight_keys'),
+    )
+    print(f"Replaced {apply_stats['replaced']}/{len(quantized)} weights")
+    if apply_stats['skipped']:
+        print(f"Skipped {len(apply_stats['skipped'])} shared-KV checkpoint entries")
+
     # Now generate
     print(f"\nGenerating text...")
     prompt = "Write a short poem about artificial intelligence:"
@@ -82,7 +96,8 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', default='models/gemma-4-E2B')
+    parser.add_argument('--quantized', default='quantized/gemma-4-E2B-sub1bit.pt')
     parser.add_argument('--tokens', type=int, default=20)
     args = parser.parse_args()
 
-    test_generation(args.model, args.tokens)
+    test_generation(args.model, args.quantized, args.tokens)
