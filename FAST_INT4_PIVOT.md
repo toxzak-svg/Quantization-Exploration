@@ -69,6 +69,117 @@ To beat FP8 throughput, the next implementation step is one of:
 
 Do not claim higher throughput until one of those backends is benchmarked against an FP8 baseline on the target GPU.
 
+## Error-budget residual iteration
+
+The next sub-4-bit candidate is an INT2 base plus a 1-bit residual and a sparse error-budget side channel. The side channel stores the largest remaining residual corrections per group as index plus signed INT4 correction codes.
+
+Build a smoke artifact:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\quantize_error_budget_residual.py `
+  --model-dir models\gemma-4-E2B `
+  --output quantized\gemma_int2_error_budget_g128_k8_smoke.pt `
+  --group-size 128 `
+  --outliers-per-group 8 `
+  --max-layers 4
+```
+
+Scan reconstruction tradeoffs:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\scan_error_budget_residual.py `
+  --model-dir models\gemma-4-E2B `
+  --group-size 128 `
+  --outliers-per-group 8 `
+  --max-layers 4
+```
+
+Current local 4-layer scan:
+
+| Method | BPW | Weighted RMSE | Compression vs BF16 |
+|--------|-----|---------------|---------------------|
+| INT2 base | 2.1250 | 0.010457 | 7.53x |
+| INT2 + 1-bit residual | 3.2500 | 0.005689 | 4.92x |
+| INT2 + 1-bit residual + g128/k8 side channel | 4.0625 | 0.004022 | 3.94x |
+| Groupwise INT4 g128 | 4.1250 | 0.002821 | 3.88x |
+
+The side channel is doing useful work: it roughly halves the weighted MSE of the plain 1-bit residual while staying slightly smaller than g128 INT4. It does not yet beat INT4 reconstruction quality, so it is not the final "beats existing 4-bit" result.
+
+The best below-INT4 g256 variant tested so far was g256/k18:
+
+| Method | BPW | Weighted RMSE | Compression vs BF16 |
+|--------|-----|---------------|---------------------|
+| INT2 + 1-bit residual + g256/k18 side channel | 4.0313 | 0.004073 | 3.97x |
+| Groupwise INT4 g256 | 4.0625 | 0.003100 | 3.94x |
+
+That is smaller than g256 INT4 and better than the binary residual, but still behind INT4 reconstruction quality.
+
+## Mixed budget iteration
+
+Uniform sub-4-bit residual formats still trail INT4. A better next step is mixed budgeting: compute several candidate formats per matrix, then greedily allocate extra bits where they buy the largest weighted error reduction.
+
+Run the mixed-budget scan:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\scan_mixed_budget.py `
+  --model-dir models\gemma-4-E2B `
+  --group-size 128 `
+  --outlier-options 4,8 `
+  --max-layers 8 `
+  --output eval_results\mixed_budget_scan_8layers_g128.json
+```
+
+Run a stricter 4.0 BPW target:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\scan_mixed_budget.py `
+  --model-dir models\gemma-4-E2B `
+  --group-size 128 `
+  --outlier-options 4,8 `
+  --max-layers 8 `
+  --target-bpw 4.0 `
+  --output eval_results\mixed_budget_scan_8layers_g128_target4p0.json
+```
+
+Current 8-matrix scan:
+
+| Method | BPW | Weighted RMSE | Compression vs BF16 |
+|--------|-----|---------------|---------------------|
+| Uniform groupwise INT4 g128 | 4.1250 | 0.002982 | 3.88x |
+| Mixed budget, near-INT4 target | 4.1030 | 0.002982 | 3.90x |
+| Mixed budget, 4.0 BPW target | 3.9959 | 0.003163 | 4.00x |
+
+The near-INT4 target found cheap savings by downgrading low-impact matrices while preserving reconstruction almost exactly. The 4.0 BPW target selected one large `int2_error_budget_k4` matrix, one tiny `int2_base` matrix, and INT4 for the rest. This is the most promising direction so far, but it is still a reconstruction result. A real claim needs either activation-weighted calibration or short perplexity evaluation of a material mixed artifact.
+
+Full-surface scan:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\scan_mixed_budget.py `
+  --model-dir models\gemma-4-E2B `
+  --group-size 128 `
+  --outlier-options 4,8 `
+  --target-bpw 4.0 `
+  --output eval_results\mixed_budget_scan_full_g128_target4p0.json
+```
+
+Build the selected mixed checkpoint:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\quantize_mixed_budget.py `
+  --scan-json eval_results\mixed_budget_scan_full_g128_target4p0.json `
+  --model-dir models\gemma-4-E2B `
+  --output quantized\gemma_mixed_budget_full_g128_target4p0.pt
+```
+
+Current full-surface result:
+
+| Method | Layers | BPW | Weighted RMSE | Compression vs BF16 | Size |
+|--------|--------|-----|---------------|---------------------|------|
+| Uniform groupwise INT4 g128 | 316 | 4.1250 | 0.002849 | 3.88x | not built locally |
+| Mixed budget full g128 target 4.0 | 316 | 3.9990 | 0.002947 | 4.00x | 948 MB |
+
+The full mixed artifact uses `301` groupwise INT4 matrices, `14` INT2+binary-residual matrices, and `1` INT2+error-budget-k4 matrix. This is a real full-model storage artifact and the best current quality-per-byte result in the repo, but it is still reconstruction-only. A local CPU `128` token limited perplexity run was attempted and stopped after it produced no output in about 90 seconds; run the perplexity path on CUDA/Colab for a meaningful result.
+
 ## Current local smoke result
 
 On the first two Gemma language-model matrices with group size 128:

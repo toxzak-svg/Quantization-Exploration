@@ -14,6 +14,15 @@ from .groupwise_int4 import (
     quantize_groupwise_int4,
     unpack_signed_int4,
 )
+from .mixed_budget import allocate_mixed_budget, summarize_allocation
+from .error_budget_residual import (
+    dequantize_binary_residual,
+    dequantize_error_budget_residual,
+    estimate_binary_residual_bpw,
+    estimate_error_budget_residual_bpw,
+    quantize_binary_residual,
+    quantize_error_budget_residual,
+)
 from .gguf_writer import GGUFWriter, GGML_TYPES, GGUF_TYPES
 from .pack_gguf import pack_sub1bit_model, QuantizedLayer
 
@@ -38,6 +47,14 @@ __all__ = [
     "pack_signed_int4",
     "quantize_groupwise_int4",
     "unpack_signed_int4",
+    "allocate_mixed_budget",
+    "summarize_allocation",
+    "dequantize_binary_residual",
+    "dequantize_error_budget_residual",
+    "estimate_binary_residual_bpw",
+    "estimate_error_budget_residual_bpw",
+    "quantize_binary_residual",
+    "quantize_error_budget_residual",
     "GGUFWriter",
     "GGML_TYPES",
     "GGUF_TYPES",

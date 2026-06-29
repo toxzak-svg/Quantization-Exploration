@@ -146,6 +146,49 @@ class EvalRegressionTests(unittest.TestCase):
         self.assertNotIn("calculate_perplexity_simple", function_names)
         self.assertIn("eval_perplexity", source)
 
+    def test_reconstruct_quantized_entry_supports_binary_residual_format(self):
+        from src.error_budget_residual import quantize_binary_residual
+
+        weight = torch.tensor(
+            [[-1.0, -0.25, 0.25, 1.0], [0.0, 0.5, -0.5, 0.75]],
+            dtype=torch.float32,
+        )
+        entry = quantize_binary_residual(weight, group_size=4)
+
+        restored = eval_quantized.reconstruct_quantized_entry(entry)
+
+        self.assertEqual(tuple(restored.shape), tuple(weight.shape))
+        self.assertLess((restored - weight).pow(2).mean().item(), 0.1)
+
+    def test_reconstruct_quantized_entry_supports_error_budget_residual_format(self):
+        from src.error_budget_residual import quantize_error_budget_residual
+
+        weight = torch.tensor(
+            [[-1.0, -0.75, -0.2, 0.1, 0.4, 0.8, 1.0, -0.5]],
+            dtype=torch.float32,
+        )
+        entry = quantize_error_budget_residual(weight, group_size=8, outliers_per_group=2)
+
+        restored = eval_quantized.reconstruct_quantized_entry(entry)
+
+        self.assertEqual(tuple(restored.shape), tuple(weight.shape))
+        self.assertLess((restored - weight).pow(2).mean().item(), 0.1)
+
+    def test_reconstruct_quantized_entry_supports_int2_base_format(self):
+        from src.error_budget_residual import dequantize_binary_residual, quantize_binary_residual
+
+        weight = torch.tensor(
+            [[-1.0, -0.25, 0.25, 1.0], [0.0, 0.5, -0.5, 0.75]],
+            dtype=torch.float32,
+        )
+        entry = quantize_binary_residual(weight, group_size=4)
+        entry["format"] = "int2_base"
+
+        restored = eval_quantized.reconstruct_quantized_entry(entry)
+        expected = dequantize_binary_residual(entry, include_residual=False)
+
+        self.assertTrue(torch.equal(restored, expected))
+
 
 if __name__ == "__main__":
     unittest.main()
