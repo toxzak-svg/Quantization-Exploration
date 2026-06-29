@@ -14,8 +14,8 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
-BASE = "https://comparative-representative-off-keyboards.trycloudflare.com"
-TOKEN = "y4x9SYvUGW2NuNc9wXVeoHJC3gsKuzP3"
+BASE = "https://prime-apparently-types-explanation.trycloudflare.com"
+TOKEN = "pNWps4V97_opsqamUqTwvr8HK4JI_bDd"
 
 
 def _hdr(extra: dict | None = None) -> dict:
