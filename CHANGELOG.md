@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## 2026-06-29
 
-Daily sync.
+- Added live Colab BF16 baseline comparison for `gemma_mixed_budget_full_g128_target4p0.pt`.
+- Mixed budget full g128 target 4.0 measured 107.5656 PPL vs 108.4542 PPL for the unquantized BF16 base on the same 292,282-token WikiText runner.
+- Documented the narrow claim as BF16-baseline-equivalent perplexity at about 4.00 BPW, not FP16/FP8 or throughput.
 
 ## 2026-06-28
 

@@ -171,14 +171,23 @@ Build the selected mixed checkpoint:
   --output quantized\gemma_mixed_budget_full_g128_target4p0.pt
 ```
 
-Current full-surface result:
+Current full-surface reconstruction result:
 
 | Method | Layers | BPW | Weighted RMSE | Compression vs BF16 | Size |
 |--------|--------|-----|---------------|---------------------|------|
 | Uniform groupwise INT4 g128 | 316 | 4.1250 | 0.002849 | 3.88x | not built locally |
 | Mixed budget full g128 target 4.0 | 316 | 3.9990 | 0.002947 | 4.00x | 948 MB |
 
-The full mixed artifact uses `301` groupwise INT4 matrices, `14` INT2+binary-residual matrices, and `1` INT2+error-budget-k4 matrix. This is a real full-model storage artifact and the best current quality-per-byte result in the repo, but it is still reconstruction-only. A local CPU `128` token limited perplexity run was attempted and stopped after it produced no output in about 90 seconds; run the perplexity path on CUDA/Colab for a meaningful result.
+The full mixed artifact uses `301` groupwise INT4 matrices, `14` INT2+binary-residual matrices, and `1` INT2+error-budget-k4 matrix. This is a real full-model storage artifact and the best current quality-per-byte result in the repo.
+
+Live Colab CUDA perplexity, 2026-06-29:
+
+| Run | Runtime dtype | BPW | WikiText tokens | Chunks | PPL |
+|-----|---------------|-----|-----------------|--------|-----|
+| Unquantized `google/gemma-4-E2B` base | BF16 | 16.00 | 292282 | 571 | 108.4542 |
+| Mixed budget full g128 target 4.0 | BF16 dense eval after applying quantized weights | 3.9990 | 292282 | 571 | 107.5656 |
+
+This supports a narrow claim: BF16-baseline-equivalent perplexity on this exact Gemma4/WikiText/Colab runner at about 4.00 BPW. It is not an FP16 result, not an FP8 comparison, and not a throughput result because the evaluator reconstructs/applies weights into a normal dense model for correctness.
 
 ## Current local smoke result
 
