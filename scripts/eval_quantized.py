@@ -8,6 +8,7 @@ import sys
 from typing import Callable, Iterable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.error_budget_residual import dequantize_binary_residual, dequantize_error_budget_residual
 from src.groupwise_int4 import dequantize_groupwise_int4
 from src.quantization import ternary_unpack, sigma_dequantize
 
@@ -136,6 +137,15 @@ def reconstruct_weight(q_entry: dict, device: str = 'cpu') -> torch.Tensor:
 def reconstruct_quantized_entry(q_entry: dict, device: str = 'cpu') -> torch.Tensor:
     if q_entry.get('format') == 'groupwise_int4' or 'packed_int4' in q_entry:
         return dequantize_groupwise_int4(q_entry, device)
+
+    if q_entry.get('format') == 'int2_error_budget_residual':
+        return dequantize_error_budget_residual(q_entry, device)
+
+    if q_entry.get('format') == 'int2_base':
+        return dequantize_binary_residual(q_entry, device, include_residual=False)
+
+    if q_entry.get('format') == 'int2_binary_residual' or 'base_packed' in q_entry:
+        return dequantize_binary_residual(q_entry, device)
 
     if {'U_packed', 'Vt_packed', 'S'}.issubset(q_entry):
         return reconstruct_weight(q_entry, device)
