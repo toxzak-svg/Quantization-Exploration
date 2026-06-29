@@ -8,14 +8,15 @@ Usage:
 from __future__ import annotations
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
 import urllib.request
 import urllib.error
 
-BASE = "https://prime-apparently-types-explanation.trycloudflare.com"
-TOKEN = "pNWps4V97_opsqamUqTwvr8HK4JI_bDd"
+BASE = os.getenv("BRIDGE_URL", "https://prime-apparently-types-explanation.trycloudflare.com")
+TOKEN = os.getenv("BRIDGE_TOKEN", "pNWps4V97_opsqamUqTwvr8HK4JI_bDd")
 
 
 def _hdr(extra: dict | None = None) -> dict:
