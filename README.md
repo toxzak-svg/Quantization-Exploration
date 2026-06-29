@@ -8,6 +8,7 @@ Experiments in ultra-low bit quantization (≤0.7 bits/weight) for LLM inference
 
 | Method | BPW | Compression | Est. PPL | Status |
 |--------|-----|------------|----------|--------|
+| **Mixed Budget g128 target 4.0** | 4.00 | 4.00x vs BF16 | 107.57 vs BF16 base 108.45 | **BF16-BASELINE-EQUIVALENT ON COLAB RUNNER** |
 | **Groupwise INT4 (g128)** | 4.13 | 3.88x vs BF16 | TBD | **PIVOT FOR FP8-LIKE QUALITY** |
 | **Ternary Aggressive** | 1.60 | 10x | ~66 | **RECOMMENDED** |
 | Magnitude Quant (4/2-bit) | 2.13 | 7.5x | ~128 | Good quality |
@@ -15,10 +16,11 @@ Experiments in ultra-low bit quantization (≤0.7 bits/weight) for LLM inference
 
 ### Key Findings
 
-1. **Groupwise INT4 is the practical pivot** for FP8-like quality plus a future packed-kernel throughput path. See [FAST_INT4_PIVOT.md](FAST_INT4_PIVOT.md).
-2. **Ternary Aggressive achieves best balance among the original low-BPW experiments** with 10x compression and ~66 estimated perplexity
-3. **SVD with 90% threshold FAILS** - near-full-rank decomposition (95% of max) provides no actual compression benefit
-4. **Per-layer MSE analysis** available in [EVAL_RESULTS.md](EVAL_RESULTS.md)
+1. **Mixed Budget g128 target 4.0 is the current quality-per-byte artifact**: 3.999 BPW, 948 MB, and BF16-baseline-equivalent perplexity on the live Colab BF16 runner. The CUDA run measured 107.5656 PPL for the mixed checkpoint vs 108.4542 PPL for the unquantized BF16 base model on the same WikiText span.
+2. **Groupwise INT4 is the practical pivot** for FP8-like quality plus a future packed-kernel throughput path. See [FAST_INT4_PIVOT.md](FAST_INT4_PIVOT.md).
+3. **Ternary Aggressive achieves best balance among the original low-BPW experiments** with 10x compression and ~66 estimated perplexity
+4. **SVD with 90% threshold FAILS** - near-full-rank decomposition (95% of max) provides no actual compression benefit
+5. **Per-layer MSE analysis** available in [EVAL_RESULTS.md](EVAL_RESULTS.md)
 
 ---
 

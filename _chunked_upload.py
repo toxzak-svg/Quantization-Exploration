@@ -6,8 +6,8 @@ Usage: python _chunked_upload.py <local_pt> <remote_dir>
 """
 import os, sys, math, time, json, hashlib, urllib.request, urllib.error
 
-BASE = "https://prime-apparently-types-explanation.trycloudflare.com"
-TOKEN = "pNWps4V97_opsqamUqTwvr8HK4JI_bDd"
+BASE = os.getenv("BRIDGE_URL", "https://prime-apparently-types-explanation.trycloudflare.com")
+TOKEN = os.getenv("BRIDGE_TOKEN", "pNWps4V97_opsqamUqTwvr8HK4JI_bDd")
 
 CHUNK_SIZE = 32 * 1024 * 1024  # 32 MB
 MAX_TRIES = 3
@@ -15,7 +15,15 @@ MAX_TRIES = 3
 LOCAL_PT = sys.argv[1]
 REMOTE_DIR = sys.argv[2]
 LOCAL_SIZE = os.path.getsize(LOCAL_PT)
-LOCAL_SHA = hashlib.sha256(open(LOCAL_PT, "rb").read()).hexdigest()
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+LOCAL_SHA = file_sha256(LOCAL_PT)
 NCHUNKS = math.ceil(LOCAL_SIZE / CHUNK_SIZE)
 
 print(f"local   : {LOCAL_PT}")
@@ -33,7 +41,7 @@ verify_script = f"""import os, subprocess, hashlib, sys
 chunks_dir = "{REMOTE_TMP}"
 final_path = "{FINAL_REMOTE}"
 os.makedirs(os.path.dirname(final_path), exist_ok=True)
-files = sorted(os.listdir(chunks_dir), key=lambda n: int(n.split("_")[2].split(".")[0]))
+files = sorted(os.listdir(chunks_dir), key=lambda n: int(n.split("_")[1].split(".")[0]))
 print("chunks to cat:", files)
 total = 0
 with open(final_path, "wb") as out:
@@ -75,6 +83,32 @@ def exec_py(code, timeout=30):
                                   data=body)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
+
+
+def upload_bytes(remote_path, content, timeout=60):
+    boundary = "----MavisTinyBoundary7e3f1a02"
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="path"\r\n\r\n'
+        f"{remote_path}\r\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(remote_path)}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    ).encode()
+    body = head + content + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        f"{BASE}/upload",
+        data=body,
+        method="POST",
+        headers={
+            "X-Bridge-Token": TOKEN,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
 print("\n=== prep kernel ===")
 print(json.dumps(exec_py(f"import os, shutil; os.makedirs('{REMOTE_TMP}', exist_ok=True); print('ready')"), indent=2))
 print()
@@ -130,7 +164,7 @@ print(f"\n=== uploaded {len(chunks)} chunks ===")
 
 # Step 3: upload the verify script as a tiny /upload
 print("\n=== upload verify script ===")
-print(json.dumps(upload_text_or_multipart(f"{REMOTE_DIR}/_chunked_verify.py", open(VERIFY_PATH, "rb").read()), indent=2))
+print(json.dumps(upload_bytes(f"{REMOTE_DIR}/_chunked_verify.py", open(VERIFY_PATH, "rb").read()), indent=2))
 
 # Step 4: kick off verification+reassembly on the kernel
 print("\n=== run verify on kernel ===")
