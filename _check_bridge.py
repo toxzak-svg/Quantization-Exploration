@@ -1,6 +1,8 @@
 import urllib.request, urllib.error
-TOKEN = "pNWps4V97_opsqamUqTwvr8HK4JI_bDd"
-BASE = "https://prime-apparently-types-explanation.trycloudflare.com"
+import os
+
+TOKEN = os.getenv("BRIDGE_TOKEN", "pNWps4V97_opsqamUqTwvr8HK4JI_bDd")
+BASE = os.getenv("BRIDGE_URL", "https://prime-apparently-types-explanation.trycloudflare.com")
 
 try:
     req = urllib.request.Request(BASE + "/health", headers={"X-Bridge-Token": TOKEN})
