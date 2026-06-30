@@ -1,0 +1,1 @@
+{"code":"import subprocess; subprocess.run(['python3', '/content/sub1quant/experiments/colab_spawn_orchestrator.py'], check=True)"}

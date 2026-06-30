@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -35,15 +36,59 @@ def parse_int_list(raw: str) -> list[int]:
     return values
 
 
+ACT_WEIGHT_FLOOR = 0.05
+ACT_WEIGHT_CEIL = 20.0
+
+
 def load_activation_weights(path: str | None) -> dict[str, float]:
     if not path:
         return {}
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return {str(key): float(value) for key, value in data.items()}
+    return {
+        str(key): max(ACT_WEIGHT_FLOOR, min(ACT_WEIGHT_CEIL, float(value)))
+        for key, value in data.items()
+    }
 
 
 def candidate(method: str, bpw: float, value_mse: float) -> dict:
     return {"method": method, "bpw": float(bpw), "mse": float(value_mse)}
+
+
+def load_resume_records(path: Path | str | None) -> dict[str, dict]:
+    if not path:
+        return {}
+    resume_path = Path(path)
+    if not resume_path.exists():
+        return {}
+
+    records: dict[str, dict] = {}
+    with resume_path.open("r", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            key = record.get("key")
+            if not key:
+                raise ValueError(f"{resume_path}:{line_no} missing layer key")
+            records[str(key)] = record
+    return records
+
+
+def append_resume_record(path: Path | str, record: dict) -> None:
+    resume_path = Path(path)
+    resume_path.parent.mkdir(parents=True, exist_ok=True)
+    with resume_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def uniform_int4_candidate_from_layer(layer: dict) -> dict:
+    for item in layer.get("candidates", []):
+        if item.get("method") == "groupwise_int4":
+            return {"params": int(layer["params"]), **item}
+    raise ValueError(f"layer {layer.get('key', layer.get('idx'))} has no groupwise_int4 candidate")
 
 
 def scan(
@@ -54,11 +99,22 @@ def scan(
     target_bpw: float | None,
     target_margin_bpw: float,
     activation_weights: dict[str, float],
+    resume_jsonl: Path | None = None,
 ) -> dict:
     layers = []
     uniform_int4 = []
+    resume_records = load_resume_records(resume_jsonl)
 
     for idx, key, weight in iter_model_weights(model_dir, max_layers=max_layers):
+        if key in resume_records:
+            layer = resume_records[key]
+            layers.append(layer)
+            uniform_int4.append(uniform_int4_candidate_from_layer(layer))
+            print(json.dumps({"idx": idx, "key": key, "resumed": True}), flush=True)
+            del weight
+            gc.collect()
+            continue
+
         params = weight.numel()
         layer_candidates = []
 
@@ -103,6 +159,8 @@ def scan(
         }
         layers.append(layer)
         print(json.dumps({"idx": idx, "key": key, "candidates": layer["candidates"]}), flush=True)
+        if resume_jsonl is not None:
+            append_resume_record(resume_jsonl, layer)
 
         del weight, binary, base_only, int4, binary_entry, int4_entry
         gc.collect()
@@ -133,6 +191,11 @@ def main() -> None:
     parser.add_argument("--target-bpw", type=float, default=None)
     parser.add_argument("--target-margin-bpw", type=float, default=0.01)
     parser.add_argument("--activation-weights", default=None)
+    parser.add_argument(
+        "--resume-jsonl",
+        default=None,
+        help="Append one completed layer record per line and reuse it on restart.",
+    )
     parser.add_argument("--output", default="eval_results/mixed_budget_scan.json")
     args = parser.parse_args()
 
@@ -144,6 +207,7 @@ def main() -> None:
         target_bpw=args.target_bpw,
         target_margin_bpw=args.target_margin_bpw,
         activation_weights=load_activation_weights(args.activation_weights),
+        resume_jsonl=Path(args.resume_jsonl) if args.resume_jsonl else None,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

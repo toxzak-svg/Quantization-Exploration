@@ -1,0 +1,1 @@
+{"code":"import json, os; p='/content/sub1quant/eval_results/act_weighted_scan/ppl/target_3.75.json'; print('exists:', os.path.exists(p), 'size:', os.path.getsize(p) if os.path.exists(p) else 0); print(json.dumps(json.load(open(p)), indent=2)) if os.path.exists(p) else None"}

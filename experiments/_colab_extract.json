@@ -1,0 +1,1 @@
+{"code":"import zipfile, os; z = zipfile.ZipFile('/content/sub1quant_slim.zip', 'r'); z.extractall('/content/sub1quant'); z.close(); print('extracted', len(os.listdir('/content/sub1quant')), 'top-level items')"}

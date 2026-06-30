@@ -1,0 +1,1 @@
+{"code":"import os, time; print('time:', time.strftime('%H:%M:%S')); log = '/content/model_download.log'; print('--- last 30 lines of model_download.log ---'); lines = open(log).readlines(); print(''.join(lines[-30:]))"}

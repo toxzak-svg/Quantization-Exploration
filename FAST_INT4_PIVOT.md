@@ -151,6 +151,23 @@ Current 8-matrix scan:
 
 The near-INT4 target found cheap savings by downgrading low-impact matrices while preserving reconstruction almost exactly. The 4.0 BPW target selected one large `int2_error_budget_k4` matrix, one tiny `int2_base` matrix, and INT4 for the rest. This is the most promising direction so far, but it is still a reconstruction result. A real claim needs either activation-weighted calibration or short perplexity evaluation of a material mixed artifact.
 
+Collect activation weights for a calibrated mixed-budget pass:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\collect_activation_weights.py `
+  --model-dir models\gemma-4-E2B `
+  --wikitext data\wiki.test.txt `
+  --tokens 32768 `
+  --output eval_results\activation_weights_gemma4.json `
+  --stats-output eval_results\activation_stats_gemma4.json `
+  --progress-output eval_results\activation_weights_progress.json `
+  --save-every-chunks 1
+```
+
+The collector writes stats, normalized activation weights, and progress JSON
+after every chunk. On Colab, use mounted Drive paths for these three outputs if
+you need the calibration state to survive a runtime disconnect or reset.
+
 Full-surface scan:
 
 ```powershell
@@ -159,8 +176,16 @@ Full-surface scan:
   --group-size 128 `
   --outlier-options 4,8 `
   --target-bpw 4.0 `
+  --activation-weights eval_results\activation_weights_gemma4.json `
+  --resume-jsonl eval_results\mixed_budget_scan_full_g128_target4p0.layers.jsonl `
   --output eval_results\mixed_budget_scan_full_g128_target4p0.json
 ```
+
+On Colab, put `--resume-jsonl` on mounted Drive or another persistent path when
+possible, for example `/content/drive/MyDrive/sub1quant_saves/...layers.jsonl`.
+The scanner appends and fsyncs one completed layer record at a time, so rerunning
+the same command after a disconnect reuses completed layer candidates instead of
+starting over.
 
 Build the selected mixed checkpoint:
 
@@ -168,8 +193,14 @@ Build the selected mixed checkpoint:
 .\.venv\Scripts\python.exe scripts\quantize_mixed_budget.py `
   --scan-json eval_results\mixed_budget_scan_full_g128_target4p0.json `
   --model-dir models\gemma-4-E2B `
+  --checkpoint-dir quantized\mixed_budget_full_g128_target4p0_shards `
   --output quantized\gemma_mixed_budget_full_g128_target4p0.pt
 ```
+
+On Colab, point `--checkpoint-dir` at mounted Drive if the run may be interrupted.
+Each layer shard is written through a temporary file and then atomically renamed.
+Rerunning the same build command validates and reuses matching shards before
+assembling the final `.pt` checkpoint.
 
 Current full-surface reconstruction result:
 

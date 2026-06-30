@@ -19,6 +19,7 @@ from src.groupwise_int4 import quantize_groupwise_int4
 
 
 ERROR_BUDGET_RE = re.compile(r"^int2_error_budget_k(\d+)$")
+SHARD_SCHEMA_VERSION = 1
 
 
 def build_selection_map(scan: dict) -> dict[str, str]:
@@ -57,12 +58,47 @@ def quantize_weight_for_method(weight: torch.Tensor, method: str, group_size: in
     raise ValueError(f"Unsupported mixed-budget method {method!r}")
 
 
+def layer_shard_path(checkpoint_dir: Path, idx: int) -> Path:
+    return checkpoint_dir / f"layer_{idx:05d}.pt"
+
+
+def save_layer_shard(checkpoint_dir: Path, layer_stat: dict, entry: dict, group_size: int) -> Path:
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    shard_path = layer_shard_path(checkpoint_dir, int(layer_stat["idx"]))
+    tmp_path = shard_path.with_suffix(shard_path.suffix + ".tmp")
+    payload = {
+        "schema_version": SHARD_SCHEMA_VERSION,
+        "group_size": int(group_size),
+        "key": str(layer_stat["key"]),
+        "method": str(layer_stat["method"]),
+        "layer_stat": layer_stat,
+        "entry": entry,
+    }
+    torch.save(payload, tmp_path)
+    tmp_path.replace(shard_path)
+    return shard_path
+
+
+def load_layer_shard(shard_path: Path, key: str, method: str, group_size: int) -> dict:
+    payload = torch.load(shard_path, map_location="cpu", weights_only=True)
+    if payload.get("schema_version") != SHARD_SCHEMA_VERSION:
+        raise ValueError(f"{shard_path} has unsupported shard schema")
+    if payload.get("group_size") != int(group_size):
+        raise ValueError(f"{shard_path} group size does not match requested build")
+    if payload.get("key") != key:
+        raise ValueError(f"{shard_path} key does not match requested build")
+    if payload.get("method") != method:
+        raise ValueError(f"{shard_path} method does not match requested build")
+    return payload
+
+
 def build_checkpoint(
     scan: dict,
     model_dir: Path,
     group_size: int,
     max_layers: int | None,
     skip_reconstruction_metrics: bool,
+    checkpoint_dir: Path | None = None,
 ) -> dict:
     selection = build_selection_map(scan)
     quantized: dict[int, dict] = {}
@@ -76,26 +112,29 @@ def build_checkpoint(
         if method is None:
             raise KeyError(f"No mixed-budget selection for {key}")
 
-        entry = quantize_weight_for_method(weight, method, group_size=group_size)
-        entry["key"] = key
-        quantized[idx] = entry
+        shard_path = layer_shard_path(checkpoint_dir, idx) if checkpoint_dir else None
+        if shard_path is not None and shard_path.exists():
+            shard = load_layer_shard(shard_path, key=key, method=method, group_size=group_size)
+            entry = shard["entry"]
+            layer_stat = shard["layer_stat"]
+            if not skip_reconstruction_metrics and layer_stat.get("mse") is None:
+                raise ValueError(f"{shard_path} lacks reconstruction metrics required by this build")
+            print(f"Layer {idx:3d}: resumed {method} from {shard_path}", flush=True)
+        else:
+            entry = quantize_weight_for_method(weight, method, group_size=group_size)
+            entry["key"] = key
 
-        params = weight.numel()
-        total_params += params
-        total_bits += float(entry["bpw"]) * params
+            params = weight.numel()
+            mse = None
+            rmse = None
+            if not skip_reconstruction_metrics:
+                restored = reconstruct_quantized_entry(entry)
+                error = restored - weight
+                mse = error.pow(2).mean().item()
+                rmse = mse**0.5
+                del restored, error
 
-        mse = None
-        rmse = None
-        if not skip_reconstruction_metrics:
-            restored = reconstruct_quantized_entry(entry)
-            error = restored - weight
-            mse = error.pow(2).mean().item()
-            rmse = mse**0.5
-            total_weighted_mse += mse * params
-            del restored, error
-
-        layer_stats.append(
-            {
+            layer_stat = {
                 "idx": idx,
                 "key": key,
                 "method": method,
@@ -105,12 +144,21 @@ def build_checkpoint(
                 "mse": mse,
                 "rmse": rmse,
             }
-        )
-        print(
-            f"Layer {idx:3d}: {method}, bpw={entry['bpw']:.4f}, shape={list(weight.shape)}"
-            + ("" if mse is None else f", mse={mse:.6f}, rmse={rmse:.6f}"),
-            flush=True,
-        )
+            print(
+                f"Layer {idx:3d}: {method}, bpw={entry['bpw']:.4f}, shape={list(weight.shape)}"
+                + ("" if mse is None else f", mse={mse:.6f}, rmse={rmse:.6f}"),
+                flush=True,
+            )
+            if checkpoint_dir is not None:
+                save_layer_shard(checkpoint_dir, layer_stat, entry, group_size=group_size)
+
+        quantized[idx] = entry
+        params = int(layer_stat["params"])
+        total_params += params
+        total_bits += float(layer_stat["bpw"]) * params
+        if not skip_reconstruction_metrics:
+            total_weighted_mse += float(layer_stat["mse"]) * params
+        layer_stats.append(layer_stat)
 
         del weight
         gc.collect()
@@ -148,6 +196,7 @@ def build_checkpoint(
             "group_size": group_size,
             "max_layers": max_layers,
             "source_scan": scan.get("source_scan"),
+            "checkpoint_dir": None if checkpoint_dir is None else str(checkpoint_dir),
         },
         "weight_keys": [
             {"key": item["key"], "shape": item["shape"], "method": item["method"]}
@@ -172,6 +221,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--group-size", type=int, default=None)
     parser.add_argument("--max-layers", type=int, default=None)
     parser.add_argument("--skip-reconstruction-metrics", action="store_true")
+    parser.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help="Save one layer shard after each layer and reuse matching shards on restart.",
+    )
     return parser.parse_args()
 
 
@@ -189,6 +243,7 @@ def main() -> None:
         group_size=group_size,
         max_layers=max_layers,
         skip_reconstruction_metrics=args.skip_reconstruction_metrics,
+        checkpoint_dir=Path(args.checkpoint_dir) if args.checkpoint_dir else None,
     )
 
     output = Path(args.output)

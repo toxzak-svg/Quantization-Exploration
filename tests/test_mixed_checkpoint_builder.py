@@ -1,8 +1,15 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import torch
 
-from scripts.quantize_mixed_budget import build_selection_map, quantize_weight_for_method
+from scripts.quantize_mixed_budget import (
+    build_selection_map,
+    load_layer_shard,
+    quantize_weight_for_method,
+    save_layer_shard,
+)
 
 
 class MixedCheckpointBuilderTests(unittest.TestCase):
@@ -38,6 +45,54 @@ class MixedCheckpointBuilderTests(unittest.TestCase):
 
         self.assertEqual(selection["a.weight"], "int2_base")
         self.assertEqual(selection["b.weight"], "groupwise_int4")
+
+    def test_layer_shards_round_trip_with_validation_metadata(self):
+        entry = {
+            "format": "groupwise_int4",
+            "orig_shape": [1, 4],
+            "packed_int4": torch.tensor([1, 2], dtype=torch.uint8),
+        }
+        layer_stat = {
+            "idx": 4,
+            "key": "model.language_model.layers.0.mlp.up_proj.weight",
+            "method": "groupwise_int4",
+            "shape": [1, 4],
+            "params": 4,
+            "bpw": 4.125,
+            "mse": 0.01,
+            "rmse": 0.1,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            shard_path = save_layer_shard(Path(tmp), layer_stat, entry, group_size=128)
+            loaded = load_layer_shard(
+                shard_path,
+                key=layer_stat["key"],
+                method=layer_stat["method"],
+                group_size=128,
+            )
+
+        self.assertEqual(loaded["layer_stat"], layer_stat)
+        self.assertTrue(torch.equal(loaded["entry"]["packed_int4"], entry["packed_int4"]))
+
+    def test_layer_shard_validation_rejects_wrong_method(self):
+        entry = {"format": "groupwise_int4", "orig_shape": [1, 4]}
+        layer_stat = {
+            "idx": 0,
+            "key": "w",
+            "method": "groupwise_int4",
+            "shape": [1, 4],
+            "params": 4,
+            "bpw": 4.125,
+            "mse": None,
+            "rmse": None,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            shard_path = save_layer_shard(Path(tmp), layer_stat, entry, group_size=128)
+
+            with self.assertRaises(ValueError):
+                load_layer_shard(shard_path, key="w", method="int2_base", group_size=128)
 
 
 if __name__ == "__main__":
