@@ -1,0 +1,1 @@
+{"code": "import os, subprocess\npid = open('/content/pareto_scan.pid').read().strip()\nprint('PID:', pid)\nprint('ALIVE_PROC:', os.path.exists('/proc/' + pid))\nprint(subprocess.run(['ps', '-p', pid, '-o', 'pid,etime,stat,cmd'], capture_output=True, text=True).stdout)\n"}

@@ -1,0 +1,8 @@
+Poll the colab bridge at https://based-kills-out-sussex.trycloudflare.com (token 4jwkd68_prr9TBt0GpYnJhUAgyqHbf2x). Check if the orchestrator process is alive (read /content/pareto_scan.pid, ps -p), tail the last 30 lines of /content/pareto_scan.log, and list contents of /content/sub1quant/eval_results/act_weighted_scan/{scans,checkpoints,ppl}/. Report progress briefly. If you see the final REPORT.txt, copy it via /download and show to user. If orchestrator is dead, check tail of log for the error and report.
+
+---
+[self-reminder TTL] This reminder expires at 2026-07-13 14:16:53 (America/New_York, UTC-4).
+If `Date.now() > 1783966613076`, your first action MUST be to delete this reminder and exit silently:
+mavis cron delete mavis sub1quant_pareto_poll
+
+[gate-discipline] If your guard condition is not met (CI still running, MR not merged, no new evidence), wrap a one-line status in <mavis-progress>...</mavis-progress> and exit. The progress tag lets the user glance at "still waiting" without lighting up an unread notification. Do NOT send IMs and do NOT write plain replies on skip ticks.
