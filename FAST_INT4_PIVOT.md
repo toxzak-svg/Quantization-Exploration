@@ -43,16 +43,40 @@ Run reconstruction comparison:
 .\.venv\Scripts\python.exe scripts\eval_reconstruction.py --model-dir models\gemma-4-E2B
 ```
 
-Run real perplexity:
+Run publication-grade base-vs-INT4 perplexity. This writes compact JSON with
+the full token count, chunk count, PPL values, comparison ratio, checkpoint
+stats, and exact quantized-weight application counts:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\eval_quantized.py `
+.\.venv\Scripts\python.exe scripts\run_publication_ppl.py `
+  --label groupwise_int4_g128_full `
   --quantized-pt quantized\gemma_groupwise_int4_g128.pt `
   --model-dir models\gemma-4-E2B `
   --wikitext data\wiki.test.txt `
+  --tokens all `
   --device cuda `
   --max-length 512 `
-  --stride 512
+  --stride 512 `
+  --expect-replaced 276 `
+  --expect-skipped-shared-kv 40 `
+  --output eval_results\groupwise_int4_g128_full_ppl.json
+```
+
+Colab equivalent from `/content/sub1quant`:
+
+```bash
+python -u scripts/run_publication_ppl.py \
+  --label groupwise_int4_g128_full \
+  --quantized-pt /content/sub1quant/quantized/gemma_groupwise_int4_g128.pt \
+  --model-dir /content/sub1quant/models/gemma-4-E2B \
+  --wikitext /content/sub1quant/data/wiki.test.txt \
+  --tokens all \
+  --device cuda \
+  --max-length 512 \
+  --stride 512 \
+  --expect-replaced 276 \
+  --expect-skipped-shared-kv 40 \
+  --output /content/sub1quant/eval_results/groupwise_int4_g128_full_ppl.json
 ```
 
 Use `--device cpu` only for debugging. It will be slow.
@@ -206,7 +230,7 @@ Current full-surface reconstruction result:
 
 | Method | Layers | BPW | Weighted RMSE | Compression vs BF16 | Size |
 |--------|--------|-----|---------------|---------------------|------|
-| Uniform groupwise INT4 g128 | 316 | 4.1250 | 0.002849 | 3.88x | not built locally |
+| Uniform groupwise INT4 g128 | 316 | 4.1250 | 0.002849 | 3.88x | 932.44 MiB on Colab L4 |
 | Mixed budget full g128 target 4.0 | 316 | 3.9990 | 0.002947 | 4.00x | 948 MB |
 
 The full mixed artifact uses `301` groupwise INT4 matrices, `14` INT2+binary-residual matrices, and `1` INT2+error-budget-k4 matrix. This is a real full-model storage artifact and the best current quality-per-byte result in the repo.
@@ -217,6 +241,12 @@ Live Colab CUDA perplexity, 2026-06-29:
 |-----|---------------|-----|-----------------|--------|-----|
 | Unquantized `google/gemma-4-E2B` base | BF16 | 16.00 | 292282 | 571 | 108.4542 |
 | Mixed budget full g128 target 4.0 | BF16 dense eval after applying quantized weights | 3.9990 | 292282 | 571 | 107.5656 |
+
+Uniform groupwise INT4 full perplexity is not yet in the repo. The exact gate
+is now `eval_results/groupwise_int4_g128_full_ppl.json` from
+`scripts/run_publication_ppl.py`; publish only after that JSON records the full
+`292282`-token / `571`-chunk run and `276` replaced weights with `40`
+shared-KV skips.
 
 This supports a narrow claim: BF16-baseline-equivalent perplexity on this exact Gemma4/WikiText/Colab runner at about 4.00 BPW. It is not an FP16 result, not an FP8 comparison, and not a throughput result because the evaluator reconstructs/applies weights into a normal dense model for correctness.
 

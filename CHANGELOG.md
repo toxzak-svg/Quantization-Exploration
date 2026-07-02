@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2026-07-02
+
+Daily sync.
+
 ## 2026-06-29
 
 - Added live Colab BF16 baseline comparison for `gemma_mixed_budget_full_g128_target4p0.pt`.
