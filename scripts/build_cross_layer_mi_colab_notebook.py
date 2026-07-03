@@ -20,15 +20,20 @@ What it does, top to bottom:
      ``--device cuda`` -- this is the headline real-Gemma validation.
   7. Re-runs with ``--conditioning delta`` to show how the residual
      delta changes the per-layer ranking vs unconditional.
-  8. (Optional) Copies the results JSONs to Google Drive so they
-     survive the Colab session reset.
+  8. Runs the MI-biased mixed-budget scan using the delta-conditioned
+     MI report.
+  9. Builds the selected mixed-budget checkpoint with resumable layer
+     shards.
+ 10. (Optional) Copies the remaining local results to Google Drive so
+     they survive the Colab session reset.
 
 Secrets consumed:
 
   * ``HF_TOKEN`` -- only if downloading Gemma from HF Hub. If you
     already have a local copy at ``--model-path``, this isn't needed.
-  * ``GDRIVE_RESULTS_DIR`` -- optional. Drive folder to mirror
-    ``eval_results/`` into. If unset, the Drive step is skipped.
+  * ``GDRIVE_RESULTS_DIR`` -- optional. Drive folder used as the live
+    results/checkpoint-shard directory. If unset, repo-local
+    ``eval_results/`` is used.
 
 Runtime: T4 (16 GB) is enough for Gemma 4 E2B in bfloat16; L4 (24 GB)
 gives headroom for the full matrix build at 4096 tokens.
@@ -119,7 +124,7 @@ required; everything else has a sensible default):
 | Secret | Required | Purpose |
 | --- | --- | --- |
 | `HF_TOKEN` | yes (if downloading) | Gemma 4 E2B is gated; accept the license on the HF model card first |
-| `GDRIVE_RESULTS_DIR` | no | Drive folder (e.g. `sub1quant-results`); if set, mirrors `eval_results/` to it at the end |
+| `GDRIVE_RESULTS_DIR` | no | Drive folder (e.g. `sub1quant-results`); if set, cache/results/shards are written there directly |
 
 If you'd rather not download the model, copy a local checkout to
 `/content/gemma-4-E2B` and the download cell will skip the Hub call.
@@ -259,7 +264,7 @@ print("IS_COLAB:", IS_COLAB)
 print("MODEL_ID:", MODEL_ID)
 print("GH_REPO_ID:", GH_REPO_ID)
 print("HF_TOKEN configured:", bool(HF_TOKEN))
-print("GDRIVE_RESULTS_DIR:", GDRIVE_RESULTS_DIR or "(unset -- Drive mirror will be skipped)")
+print("GDRIVE_RESULTS_DIR:", GDRIVE_RESULTS_DIR or "(unset -- using repo-local eval_results)")
 
 REPO_DIR = Path("/content/sub1quant")
 if not REPO_DIR.exists():
@@ -273,6 +278,17 @@ else:
 os.chdir(REPO_DIR)
 sys.path.insert(0, str(REPO_DIR))
 print("CWD:", Path.cwd())
+
+if GDRIVE_RESULTS_DIR and IS_COLAB:
+    from google.colab import drive
+    drive.mount("/content/drive", force_remount=False)
+    SUB1QUANT_SAVE_DIR = Path("/content/drive/MyDrive") / GDRIVE_RESULTS_DIR
+else:
+    SUB1QUANT_SAVE_DIR = REPO_DIR / "eval_results"
+
+RESULTS_DIR = SUB1QUANT_SAVE_DIR
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+print("RESULTS_DIR:", RESULTS_DIR)
 """
 ))
 
@@ -432,7 +448,7 @@ result = subprocess.run(
     [sys.executable, "bench_gpu.py",
      "--sizes", "35,512,1536;35,2048,1536",
      "--sub-sample", "2048",
-     "--output", "eval_results/gpu_bench_colab.json"],
+     "--output", str(RESULTS_DIR / "gpu_bench_colab.json")],
     capture_output=True,
     text=True,
 )
@@ -442,7 +458,7 @@ if result.returncode != 0:
     print(result.stderr)
     raise SystemExit(f"bench_gpu.py failed (rc={result.returncode})")
 
-bench = json.loads(Path("eval_results/gpu_bench_colab.json").read_text())
+bench = json.loads((RESULTS_DIR / "gpu_bench_colab.json").read_text())
 print("\\n=== Headline speedup ===")
 for r in bench["results"]:
     if r.get("speedup", 0) > 0:
@@ -471,9 +487,9 @@ Runs `scripts/run_cross_layer_mi_colab.py` with `--device cuda`. This is
 the headline deliverable: a single forward pass through Gemma 4 E2B,
 HSIC matrix build on the captured per-layer activations, and bit
 allocation at the configured target BPW (4.0). Output goes to
-`eval_results/cross_layer_mi_colab.json`.
+`RESULTS_DIR / "cross_layer_mi_colab.json"`.
 
-Calibration activations are cached at `/content/calib_activations.pt`,
+Calibration activations are cached at `RESULTS_DIR / "calib_activations.pt"`,
 so the conditional-MI run in step 10 reuses them and only re-runs the
 delta preprocessing + matrix build.
 """
@@ -491,8 +507,9 @@ cmd = [
     "--model-path", str(MODEL_DIR),
     "--calib-data", str(CALIB_PATH),
     "--calib-tokens", "2048",
-    "--cache", "/content/calib_activations.pt",
-    "--output", "eval_results/cross_layer_mi_colab.json",
+    "--cache", str(RESULTS_DIR / "calib_activations.pt"),
+    "--output", str(RESULTS_DIR / "cross_layer_mi_colab.json"),
+    "--progress-output", str(RESULTS_DIR / "cross_layer_mi_colab.progress.json"),
     "--horizon", "4",
     "--target-bpw", "4.0",
     "--bits-min", "1.5",
@@ -508,7 +525,7 @@ if result.returncode != 0:
     print(result.stderr)
     raise SystemExit(f"unconditional pipeline failed (rc={result.returncode})")
 
-REPORT_UNCOND = Path("eval_results/cross_layer_mi_colab.json")
+REPORT_UNCOND = RESULTS_DIR / "cross_layer_mi_colab.json"
 print(f"Report written to {REPORT_UNCOND} ({REPORT_UNCOND.stat().st_size} bytes)")
 """
 ))
@@ -531,7 +548,7 @@ cells.append(code(
 from pathlib import Path
 from IPython.display import display, Markdown
 
-report = json.loads(Path("eval_results/cross_layer_mi_colab.json").read_text())
+report = json.loads((RESULTS_DIR / "cross_layer_mi_colab.json").read_text())
 
 n = report["n_layers"]
 mi_scores = report["mi_scores"]
@@ -588,8 +605,9 @@ cmd = [
     "--model-path", str(MODEL_DIR),
     "--calib-data", str(CALIB_PATH),
     "--calib-tokens", "2048",
-    "--cache", "/content/calib_activations.pt",  # reuse cache
-    "--output", "eval_results/cross_layer_mi_colab_delta.json",
+    "--cache", str(RESULTS_DIR / "calib_activations.pt"),  # reuse cache
+    "--output", str(RESULTS_DIR / "cross_layer_mi_colab_delta.json"),
+    "--progress-output", str(RESULTS_DIR / "cross_layer_mi_colab_delta.progress.json"),
     "--horizon", "4",
     "--target-bpw", "4.0",
     "--bits-min", "1.5",
@@ -606,7 +624,7 @@ if result.returncode != 0:
     print(result.stderr)
     raise SystemExit(f"delta-conditioning pipeline failed (rc={result.returncode})")
 
-REPORT_COND = Path("eval_results/cross_layer_mi_colab_delta.json")
+REPORT_COND = RESULTS_DIR / "cross_layer_mi_colab_delta.json"
 print(f"Delta-conditioned report written to {REPORT_COND}")
 """
 ))
@@ -631,8 +649,8 @@ cells.append(code(
 from pathlib import Path
 from IPython.display import display, Markdown
 
-uncond = json.loads(Path("eval_results/cross_layer_mi_colab.json").read_text())
-cond = json.loads(Path("eval_results/cross_layer_mi_colab_delta.json").read_text())
+uncond = json.loads((RESULTS_DIR / "cross_layer_mi_colab.json").read_text())
+cond = json.loads((RESULTS_DIR / "cross_layer_mi_colab_delta.json").read_text())
 
 n = uncond["n_layers"]
 assert cond["n_layers"] == n, "layer count mismatch between unconditional and conditional"
@@ -687,15 +705,99 @@ display(Markdown("### Unconditional vs conditional (delta) MI on Gemma 4 E2B\\n\
 ))
 
 # -----------------------------------------------------------------------------
-# Cell 13: Persist results to Drive (optional)
+# Cell 13: MI-biased mixed-budget scan
 # -----------------------------------------------------------------------------
 cells.append(md(
-    """## Step 12: Mirror results to Google Drive (optional)
+    """## Step 12: MI-biased mixed-budget scan
 
-If `GDRIVE_RESULTS_DIR` is set, this mounts Drive and copies
-everything in `eval_results/` (the two reports, the bench JSON, and
-the cached activations `.pt`) to the configured folder. Otherwise it
-prints a "skipping" message and moves on.
+Uses the delta-conditioned MI report as a layer prior for the mixed-budget
+allocator. This is the first candidate that actually links the cross-layer MI
+signal to a storage artifact plan. The scan is resumable: completed layer
+candidates append to `mixed_budget_scan_full_g128_target4p0_mi.layers.jsonl`.
+"""
+))
+
+cells.append(code(
+    """import subprocess
+import sys
+from pathlib import Path
+
+MI_SCAN_JSON = RESULTS_DIR / "mixed_budget_scan_full_g128_target4p0_mi.json"
+MI_SCAN_RESUME = RESULTS_DIR / "mixed_budget_scan_full_g128_target4p0_mi.layers.jsonl"
+ACT_WEIGHTS = RESULTS_DIR / "activation_weights_gemma4.json"
+
+cmd = [
+    sys.executable, "scripts/scan_mixed_budget.py",
+    "--model-dir", str(MODEL_DIR),
+    "--group-size", "128",
+    "--outlier-options", "4,8",
+    "--target-bpw", "4.0",
+    "--mi-report", str(RESULTS_DIR / "cross_layer_mi_colab_delta.json"),
+    "--mi-prior", "1.0",
+    "--resume-jsonl", str(MI_SCAN_RESUME),
+    "--output", str(MI_SCAN_JSON),
+]
+if ACT_WEIGHTS.exists():
+    cmd.extend(["--activation-weights", str(ACT_WEIGHTS)])
+
+print("Running:", " ".join(cmd))
+result = subprocess.run(cmd, capture_output=True, text=True)
+print(result.stdout)
+if result.returncode != 0:
+    print("--- STDERR ---")
+    print(result.stderr)
+    raise SystemExit(f"MI-biased mixed-budget scan failed (rc={result.returncode})")
+print(f"MI-biased scan written to {MI_SCAN_JSON} ({MI_SCAN_JSON.stat().st_size} bytes)")
+"""
+))
+
+# -----------------------------------------------------------------------------
+# Cell 14: Build MI-biased mixed-budget checkpoint
+# -----------------------------------------------------------------------------
+cells.append(md(
+    """## Step 13: Build the MI-biased mixed-budget checkpoint
+
+Builds the checkpoint selected by the MI-biased scan. Layer shards are written
+as individual `.pt` files under `RESULTS_DIR / "mixed_budget_mi_shards"` and
+reused on rerun, so a Colab disconnect does not force the build to start over.
+"""
+))
+
+cells.append(code(
+    """import subprocess
+import sys
+from pathlib import Path
+
+MI_CKPT = RESULTS_DIR / "gemma_mixed_budget_full_g128_target4p0_mi.pt"
+MI_SHARDS = RESULTS_DIR / "mixed_budget_mi_shards"
+
+cmd = [
+    sys.executable, "scripts/quantize_mixed_budget.py",
+    "--scan-json", str(RESULTS_DIR / "mixed_budget_scan_full_g128_target4p0_mi.json"),
+    "--model-dir", str(MODEL_DIR),
+    "--checkpoint-dir", str(MI_SHARDS),
+    "--output", str(MI_CKPT),
+]
+print("Running:", " ".join(cmd))
+result = subprocess.run(cmd, capture_output=True, text=True)
+print(result.stdout)
+if result.returncode != 0:
+    print("--- STDERR ---")
+    print(result.stderr)
+    raise SystemExit(f"MI-biased checkpoint build failed (rc={result.returncode})")
+print(f"MI-biased checkpoint written to {MI_CKPT} ({MI_CKPT.stat().st_size} bytes)")
+"""
+))
+
+# -----------------------------------------------------------------------------
+# Cell 15: Persist results to Drive (optional)
+# -----------------------------------------------------------------------------
+cells.append(md(
+    """## Step 14: Mirror repo-local results to Google Drive (optional)
+
+If `GDRIVE_RESULTS_DIR` is unset, this cell is skipped. If it is set, most
+artifacts were already written directly to Drive through `RESULTS_DIR`; this
+cell also mirrors any remaining repo-local `eval_results/` JSON/PT files.
 """
 ))
 
@@ -706,21 +808,17 @@ from pathlib import Path
 if not GDRIVE_RESULTS_DIR:
     print("GDRIVE_RESULTS_DIR not set -- skipping Drive mirror.")
 else:
-    if "google.colab" not in sys.modules:
-        print("Not in Colab -- skipping Drive mount.")
-    else:
-        from google.colab import drive
-        drive.mount("/content/drive", force_remount=False)
-        target = Path("/content/drive/MyDrive") / GDRIVE_RESULTS_DIR
-        target.mkdir(parents=True, exist_ok=True)
-        for src in Path("eval_results").glob("*.json"):
+    target = RESULTS_DIR
+    for src in Path("eval_results").glob("*.json"):
+        if src.resolve() != (target / src.name).resolve():
             shutil.copy2(src, target / src.name)
-        for src in Path("eval_results").glob("*.pt"):
+    for src in Path("eval_results").glob("*.pt"):
+        if src.resolve() != (target / src.name).resolve():
             shutil.copy2(src, target / src.name)
-        print(f"Mirrored eval_results/ to {target}")
-        print("Files in Drive folder:")
-        for p in sorted(target.iterdir()):
-            print(f"  {p.name}  ({p.stat().st_size} bytes)")
+    print(f"Mirrored repo-local eval_results/ to {target}")
+    print("Files in results folder:")
+    for p in sorted(target.iterdir()):
+        print(f"  {p.name}  ({p.stat().st_size} bytes)")
 """
 ))
 
@@ -735,7 +833,9 @@ After running all cells you have:
 * `eval_results/cross_layer_mi_colab.json` -- unconditional MI on real Gemma 4 E2B (35 layers, 2048 calib tokens), per-layer `mi_scores`, `bits`, `kendall_tau_vs_sigma`, `method` tag.
 * `eval_results/cross_layer_mi_colab_delta.json` -- same pipeline with `--conditioning delta`. The two rankings should differ; if they don't, the residual-stream confounder isn't material on this model.
 * `eval_results/gpu_bench_colab.json` -- CPU vs GPU timing at two Gemma-shape workloads.
-* `/content/calib_activations.pt` -- cached calibration activations (reused across the unconditional + conditional runs, so the conditional step is ~free beyond the delta + matrix build).
+* `mixed_budget_scan_full_g128_target4p0_mi.json` -- MI-biased mixed-budget allocation plan.
+* `gemma_mixed_budget_full_g128_target4p0_mi.pt` -- MI-biased checkpoint if the build step completed.
+* `calib_activations.pt` -- cached calibration activations (reused across the unconditional + conditional runs, so the conditional step is ~free beyond the delta + matrix build).
 
 ## Where to look next
 
@@ -784,7 +884,7 @@ def build_notebook() -> dict:
 def main() -> None:
     NOTEBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
     nb = build_notebook()
-    NOTEBOOK_PATH.write_text(json.dumps(nb, indent=1), encoding="utf-8")
+    NOTEBOOK_PATH.write_text(json.dumps(nb, indent=1), encoding="utf-8", newline="\n")
     n_code = sum(1 for c in cells if c["cell_type"] == "code")
     n_md = sum(1 for c in cells if c["cell_type"] == "markdown")
     print(f"Wrote {NOTEBOOK_PATH} ({NOTEBOOK_PATH.stat().st_size} bytes)")

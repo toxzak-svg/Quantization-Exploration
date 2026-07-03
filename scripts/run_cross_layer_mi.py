@@ -22,6 +22,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Allow running as ``python scripts/run_cross_layer_mi.py`` from the repo
 # root without setting PYTHONPATH explicitly.
@@ -35,6 +36,53 @@ from src.cross_layer_mi import (
     allocate_bits,
     sigma_scores_from_activations,
 )
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def save_activation_cache(
+    path: Path,
+    *,
+    hidden_states: dict[int, torch.Tensor],
+    layer_keys: list[str],
+    n_tokens: int,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(
+        {
+            "hidden_states": hidden_states,
+            "layer_keys": layer_keys,
+            "n_tokens": n_tokens,
+        },
+        tmp_path,
+    )
+    tmp_path.replace(path)
+
+
+def write_progress(
+    path: Path | None,
+    *,
+    stage: str,
+    complete: bool,
+    details: dict[str, Any] | None = None,
+) -> None:
+    if path is None:
+        return
+    write_json_atomic(
+        path,
+        {
+            "stage": stage,
+            "complete": complete,
+            "timestamp_utc": int(time.time()),
+            "details": details or {},
+        },
+    )
 
 
 def _load_text_decoder(model_path: str, dtype: torch.dtype) -> torch.nn.Module:
@@ -194,14 +242,11 @@ def collect_calibration_activations(
     )
 
     if cache_path:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "hidden_states": captured,
-                "layer_keys": layer_keys,
-                "n_tokens": n_tokens_total,
-            },
+        save_activation_cache(
             cache_path,
+            hidden_states=captured,
+            layer_keys=layer_keys,
+            n_tokens=n_tokens_total,
         )
         print(f"[calib] cached activations to {cache_path}")
 
@@ -261,14 +306,11 @@ def _synth_activations(
         n_tokens=n_tokens,
     )
     if cache_path:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "hidden_states": activations,
-                "layer_keys": layer_keys,
-                "n_tokens": n_tokens,
-            },
+        save_activation_cache(
             cache_path,
+            hidden_states=activations,
+            layer_keys=layer_keys,
+            n_tokens=n_tokens,
         )
         print(f"[synth] cached activations to {cache_path}")
     return acts
@@ -276,6 +318,13 @@ def _synth_activations(
 
 def _fmt_row(name: str, score: float, rank: int) -> str:
     return f"| {rank:2d} | {name:>8s} | {score:8.4f} |"
+
+
+def report_layer_indices(acts: CalibrationActivations, conditioning: str | None) -> list[int]:
+    indices = sorted(int(idx) for idx in acts.hidden_states)
+    if conditioning == "delta":
+        return indices[1:]
+    return indices
 
 
 def main() -> None:
@@ -289,6 +338,7 @@ def main() -> None:
     parser.add_argument("--calib-tokens", type=int, default=256)
     parser.add_argument("--cache", type=Path, default=Path("eval_results/calib_activations.pt"))
     parser.add_argument("--output", type=Path, default=Path("eval_results/cross_layer_mi_report.json"))
+    parser.add_argument("--progress-output", type=Path, default=None)
     parser.add_argument("--horizon", type=int, default=4)
     parser.add_argument("--bits-min", type=float, default=1.5)
     parser.add_argument("--bits-max", type=float, default=8.0)
@@ -317,9 +367,16 @@ def main() -> None:
     parser.add_argument("--synth-layers", type=int, default=35)
     parser.add_argument("--synth-hidden", type=int, default=1536)
     args = parser.parse_args()
+    progress_output = args.progress_output or args.output.with_suffix(".progress.json")
 
     if args.synth:
         print("[main] synthetic-activation mode: skipping model load")
+        write_progress(
+            progress_output,
+            stage="collecting_synthetic_activations",
+            complete=False,
+            details={"cache": str(args.cache), "calib_tokens": args.calib_tokens},
+        )
         acts = _synth_activations(
             n_tokens=args.calib_tokens,
             n_layers=args.synth_layers,
@@ -331,6 +388,16 @@ def main() -> None:
         calib_path = Path(args.calib_data)
         calib_text = calib_path.read_text(encoding="utf-8", errors="replace")[:200_000]
         print(f"[main] loading {len(calib_text)} chars from {calib_path}")
+        write_progress(
+            progress_output,
+            stage="collecting_model_activations",
+            complete=False,
+            details={
+                "cache": str(args.cache),
+                "calib_data": str(calib_path),
+                "calib_tokens": args.calib_tokens,
+            },
+        )
         acts = collect_calibration_activations(
             args.model_path,
             calib_text,
@@ -341,6 +408,17 @@ def main() -> None:
     print(
         f"[main] activations: {acts.layer_count()} layers, "
         f"{acts.n_tokens} tokens, hidden={next(iter(acts.hidden_states.values())).shape[-1]}"
+    )
+    write_progress(
+        progress_output,
+        stage="allocating_bits",
+        complete=False,
+        details={
+            "layers": acts.layer_count(),
+            "tokens": acts.n_tokens,
+            "device": args.device,
+            "conditioning": args.conditioning,
+        },
     )
 
     alloc = allocate_bits(
@@ -404,13 +482,19 @@ def main() -> None:
     summary["kendall_tau_vs_sigma"] = float(kendall_tau)
     summary["bits_per_layer"] = [float(b) for b in alloc.bits.tolist()]
     summary["mi_scores"] = [float(s) for s in alloc.mi_scores.tolist()]
+    summary["layer_indices"] = report_layer_indices(acts, args.conditioning)
     summary["sigma_scores"] = [float(s) for s in sigma_scores.tolist()]
     summary["calib_tokens"] = acts.n_tokens
     summary["horizon"] = args.horizon
     summary["target_avg_bpw"] = args.target_bpw
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(summary, indent=2))
+    write_json_atomic(args.output, summary)
+    write_progress(
+        progress_output,
+        stage="complete",
+        complete=True,
+        details={"output": str(args.output), "avg_bits": summary["avg_bits"]},
+    )
     print(f"\nWrote {args.output}")
 
 

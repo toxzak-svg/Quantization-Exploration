@@ -14,6 +14,8 @@ Steps:
    ``conditioning='delta'``).
 5. Allocate bits at the configured target BPW.
 6. Save the report (JSON + Markdown table) to ``eval_results/``.
+   For disconnect safety, put ``--cache``, ``--output``, and
+   ``--progress-output`` on mounted Drive.
 
 Usage from a Colab cell::
 
@@ -22,7 +24,9 @@ Usage from a Colab cell::
     !python scripts/run_cross_layer_mi_colab.py \\
         --model-path /content/gemma-4-E2B \\
         --calib-data /content/wiki.test.txt \\
-        --output eval_results/cross_layer_mi_colab.json \\
+        --cache /content/drive/MyDrive/sub1quant_saves/calib_activations.pt \\
+        --output /content/drive/MyDrive/sub1quant_saves/cross_layer_mi_colab.json \\
+        --progress-output /content/drive/MyDrive/sub1quant_saves/cross_layer_mi_progress.json \\
         --device cuda \\
         [--conditioning delta]
 
@@ -65,6 +69,7 @@ def main() -> None:
         type=Path,
         default=Path("eval_results/cross_layer_mi_colab.json"),
     )
+    parser.add_argument("--progress-output", type=Path, default=None)
     parser.add_argument("--horizon", type=int, default=4)
     parser.add_argument("--target-bpw", type=float, default=4.0)
     parser.add_argument("--bits-min", type=float, default=1.5)
@@ -100,6 +105,7 @@ def main() -> None:
         "--calib-tokens", str(args.calib_tokens),
         "--cache", str(args.cache),
         "--output", str(args.output),
+        "--progress-output", str(args.progress_output or args.output.with_suffix(".progress.json")),
         "--horizon", str(args.horizon),
         "--target-bpw", str(args.target_bpw),
         "--bits-min", str(args.bits_min),

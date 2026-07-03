@@ -22,9 +22,15 @@ from the real Gemma matrix are suspect.
 from __future__ import annotations
 
 import unittest
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 import torch
 
+from scripts import run_cross_layer_mi
 from src.cross_layer_mi import (
     CalibrationActivations,
     allocate_bits,
@@ -447,6 +453,100 @@ class ConditionalMITests(unittest.TestCase):
         self.assertIn("h2", alloc_u.method)
         self.assertNotIn("cond", alloc_u.method)
         self.assertIn("cond_delta", alloc_c.method)
+
+
+class CrossLayerMiRunnerPersistenceTests(unittest.TestCase):
+    def test_write_json_atomic_round_trips_without_tmp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report.json"
+
+            run_cross_layer_mi.write_json_atomic(path, {"stage": "done", "value": 3})
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["value"], 3)
+            self.assertFalse(path.with_suffix(".json.tmp").exists())
+
+    def test_save_activation_cache_atomic_round_trips_payload(self):
+        hidden_states = {0: torch.ones((1, 2, 3)), 1: torch.zeros((1, 2, 3))}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.pt"
+            run_cross_layer_mi.save_activation_cache(
+                path,
+                hidden_states=hidden_states,
+                layer_keys=["layer_0", "layer_1"],
+                n_tokens=2,
+            )
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+
+            self.assertEqual(payload["layer_keys"], ["layer_0", "layer_1"])
+            self.assertEqual(payload["n_tokens"], 2)
+            self.assertTrue(torch.equal(payload["hidden_states"][0], hidden_states[0]))
+            self.assertFalse(path.with_suffix(".pt.tmp").exists())
+
+    def test_write_progress_records_stage_and_completion_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "progress.json"
+
+            run_cross_layer_mi.write_progress(
+                path,
+                stage="allocating_bits",
+                complete=False,
+                details={"layers": 35},
+            )
+            progress = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(progress["stage"], "allocating_bits")
+            self.assertFalse(progress["complete"])
+            self.assertEqual(progress["details"], {"layers": 35})
+
+    def test_colab_wrapper_help_exposes_progress_output(self):
+        result = subprocess.run(
+            [sys.executable, "scripts/run_cross_layer_mi_colab.py", "--help"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--progress-output", result.stdout)
+
+    def test_script_output_records_layer_indices_for_mixed_budget_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "report.json"
+            cache = Path(tmp) / "cache.pt"
+            progress = Path(tmp) / "progress.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/run_cross_layer_mi.py",
+                    "--synth",
+                    "--synth-layers",
+                    "4",
+                    "--synth-hidden",
+                    "8",
+                    "--calib-tokens",
+                    "32",
+                    "--sub-sample",
+                    "32",
+                    "--cache",
+                    str(cache),
+                    "--output",
+                    str(out),
+                    "--progress-output",
+                    str(progress),
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(out.read_text(encoding="utf-8"))
+
+        self.assertEqual(report["layer_indices"], [0, 1, 2, 3])
+        self.assertEqual(len(report["layer_indices"]), len(report["mi_scores"]))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")

@@ -205,6 +205,27 @@ Full-surface scan:
   --output eval_results\mixed_budget_scan_full_g128_target4p0.json
 ```
 
+Run a cross-layer-MI-biased full-surface scan after producing an MI report with
+`scripts/run_cross_layer_mi_colab.py`:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\scan_mixed_budget.py `
+  --model-dir models\gemma-4-E2B `
+  --group-size 128 `
+  --outlier-options 4,8 `
+  --target-bpw 4.0 `
+  --activation-weights eval_results\activation_weights_gemma4.json `
+  --mi-report eval_results\cross_layer_mi_colab_delta.json `
+  --mi-prior 1.0 `
+  --resume-jsonl eval_results\mixed_budget_scan_full_g128_target4p0_mi.layers.jsonl `
+  --output eval_results\mixed_budget_scan_full_g128_target4p0_mi.json
+```
+
+Use `--mi-prior 0.0` for the reconstruction-only baseline and `--mi-prior 1.0`
+as the first MI-biased candidate. Larger values make MI dominate upgrade order;
+do not publish a larger-prior result until it beats the baseline scan in real
+perplexity, not just layer-ranking plausibility.
+
 On Colab, put `--resume-jsonl` on mounted Drive or another persistent path when
 possible, for example `/content/drive/MyDrive/sub1quant_saves/...layers.jsonl`.
 The scanner appends and fsyncs one completed layer record at a time, so rerunning

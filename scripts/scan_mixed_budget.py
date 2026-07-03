@@ -6,6 +6,7 @@ import argparse
 import gc
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -38,6 +39,7 @@ def parse_int_list(raw: str) -> list[int]:
 
 ACT_WEIGHT_FLOOR = 0.05
 ACT_WEIGHT_CEIL = 20.0
+LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
 
 
 def load_activation_weights(path: str | None) -> dict[str, float]:
@@ -48,6 +50,30 @@ def load_activation_weights(path: str | None) -> dict[str, float]:
         str(key): max(ACT_WEIGHT_FLOOR, min(ACT_WEIGHT_CEIL, float(value)))
         for key, value in data.items()
     }
+
+
+def load_mi_report(path: str | Path | None) -> dict[int, float]:
+    if not path:
+        return {}
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    scores = [float(item) for item in data.get("mi_scores", [])]
+    if not scores:
+        return {}
+    if "layer_indices" in data:
+        indices = [int(item) for item in data["layer_indices"]]
+        if len(indices) != len(scores):
+            raise ValueError("MI report layer_indices length does not match mi_scores length")
+        return dict(zip(indices, scores))
+    return {idx: score for idx, score in enumerate(scores)}
+
+
+def layer_mi_score(weight_key: str, mi_scores_by_layer: dict[int, float]) -> float:
+    if not mi_scores_by_layer:
+        return 0.0
+    match = LAYER_RE.search(weight_key)
+    if not match:
+        return 0.0
+    return float(mi_scores_by_layer.get(int(match.group(1)), 0.0))
 
 
 def candidate(method: str, bpw: float, value_mse: float) -> dict:
@@ -100,6 +126,8 @@ def scan(
     target_margin_bpw: float,
     activation_weights: dict[str, float],
     resume_jsonl: Path | None = None,
+    mi_scores_by_layer: dict[int, float] | None = None,
+    mi_prior: float = 0.0,
 ) -> dict:
     layers = []
     uniform_int4 = []
@@ -107,7 +135,8 @@ def scan(
 
     for idx, key, weight in iter_model_weights(model_dir, max_layers=max_layers):
         if key in resume_records:
-            layer = resume_records[key]
+            layer = dict(resume_records[key])
+            layer["mi_score"] = layer_mi_score(key, mi_scores_by_layer or {})
             layers.append(layer)
             uniform_int4.append(uniform_int4_candidate_from_layer(layer))
             print(json.dumps({"idx": idx, "key": key, "resumed": True}), flush=True)
@@ -155,6 +184,7 @@ def scan(
             "shape": list(weight.shape),
             "params": params,
             "activation_weight": activation_weights.get(key, activation_weights.get(str(idx), 1.0)),
+            "mi_score": layer_mi_score(key, mi_scores_by_layer or {}),
             "candidates": sorted(layer_candidates, key=lambda item: (item["bpw"], item["mse"], item["method"])),
         }
         layers.append(layer)
@@ -170,7 +200,13 @@ def scan(
 
     int4_summary = summarize_allocation(uniform_int4)
     budget = target_bpw if target_bpw is not None else int4_summary["avg_bpw"] - target_margin_bpw
-    allocation = allocate_mixed_budget(layers, target_avg_bpw=budget)
+    mapped_mi_scores = [float(layer.get("mi_score", 0.0)) for layer in layers]
+    allocation = allocate_mixed_budget(
+        layers,
+        target_avg_bpw=budget,
+        mi_scores=mapped_mi_scores if mi_scores_by_layer else None,
+        mi_prior=mi_prior,
+    )
     return {
         "group_size": group_size,
         "outlier_options": outlier_options,
@@ -179,6 +215,8 @@ def scan(
         "uniform_int4": int4_summary,
         "mixed_allocation": allocation,
         "layers": layers,
+        "mi_report_used": bool(mi_scores_by_layer),
+        "mi_prior": float(mi_prior),
     }
 
 
@@ -191,6 +229,17 @@ def main() -> None:
     parser.add_argument("--target-bpw", type=float, default=None)
     parser.add_argument("--target-margin-bpw", type=float, default=0.01)
     parser.add_argument("--activation-weights", default=None)
+    parser.add_argument(
+        "--mi-report",
+        default=None,
+        help="cross-layer MI report JSON with mi_scores and optional layer_indices",
+    )
+    parser.add_argument(
+        "--mi-prior",
+        type=float,
+        default=0.0,
+        help="strength of MI bias in mixed-budget upgrade selection",
+    )
     parser.add_argument(
         "--resume-jsonl",
         default=None,
@@ -208,6 +257,8 @@ def main() -> None:
         target_margin_bpw=args.target_margin_bpw,
         activation_weights=load_activation_weights(args.activation_weights),
         resume_jsonl=Path(args.resume_jsonl) if args.resume_jsonl else None,
+        mi_scores_by_layer=load_mi_report(args.mi_report),
+        mi_prior=args.mi_prior,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
