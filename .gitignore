@@ -56,3 +56,4 @@ llama.cpp/
 # OS
 .DS_Store
 Thumbs.db
+.venv/Lib/site-packages/torch/lib/torch_cpu.dll
